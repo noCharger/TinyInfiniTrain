@@ -1,6 +1,7 @@
 #include "glog/logging.h"
 #include <cub/block/block_reduce.cuh>
 
+#include "infini_train/include/cuda_utils.h"
 #include "infini_train/include/dispatcher.h"
 #include "infini_train/include/tensor.h"
 
@@ -77,7 +78,8 @@ LayerNormForward(const std::shared_ptr<Tensor> &input, const std::shared_ptr<Ten
     int threads_per_block = BLOCK_SIZE;
     int num_blocks = batch_size * max_seqlen;
 
-    LayerNormForwardKernel<BLOCK_SIZE><<<num_blocks, threads_per_block>>>(
+    LayerNormForwardKernel<BLOCK_SIZE><<<num_blocks, threads_per_block, 0,
+                                        infini_train::ThreadLocalStream(input->GetDevice().Index())>>>(
         static_cast<const float *>(input->DataPtr()), static_cast<const float *>(weight->DataPtr()),
         static_cast<const float *>(bias->DataPtr()), static_cast<float *>(mean->DataPtr()),
         static_cast<float *>(rstd->DataPtr()), static_cast<float *>(output->DataPtr()), eps, embed_dim);
@@ -121,7 +123,7 @@ __global__ void LayerNormBackwardKernel(const float *__restrict__ input, const f
 
     if (tid == 0) {
         float mean_d = dnorm_mean / embed_dim;
-        float norm_d = (dnorm_norm_mean / embed_dim) * rstd_val - mean_d * mean_val * rstd_val;
+        float norm_d = (dnorm_norm_mean / embed_dim) * rstd_val;
         shared_mean = mean_d;
         shared_norm = norm_d;
     }
@@ -156,7 +158,8 @@ LayerNormBackward(const std::shared_ptr<Tensor> &input, const std::shared_ptr<Te
     int threads_per_block = BLOCK_SIZE;
     int num_blocks = batch_size * max_seqlen;
 
-    LayerNormBackwardKernel<BLOCK_SIZE><<<num_blocks, threads_per_block>>>(
+    LayerNormBackwardKernel<BLOCK_SIZE><<<num_blocks, threads_per_block, 0,
+                                         infini_train::ThreadLocalStream(input->GetDevice().Index())>>>(
         static_cast<const float *>(input->DataPtr()), static_cast<const float *>(grad_output->DataPtr()),
         static_cast<const float *>(mean->DataPtr()), static_cast<const float *>(rstd->DataPtr()),
         static_cast<const float *>(weight->DataPtr()), static_cast<float *>(grad_input->DataPtr()),

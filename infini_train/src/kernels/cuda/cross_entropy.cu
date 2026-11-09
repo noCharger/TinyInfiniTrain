@@ -8,6 +8,7 @@
 
 #include "glog/logging.h"
 
+#include "infini_train/include/cuda_utils.h"
 #include "infini_train/include/dispatcher.h"
 #include "infini_train/include/tensor.h"
 
@@ -88,19 +89,21 @@ std::shared_ptr<Tensor> CrossEntropyForward(const std::shared_ptr<Tensor> &input
     case DataType::kUINT8: {
         const uint8_t *target_ptr = static_cast<const uint8_t *>(target->DataPtr());
         CrossEntropyForwardKernel<threads_per_block, uint8_t>
-            <<<num_blocks, threads_per_block>>>(input_ptr, target_ptr, batched_loss_ptr, bs, num_classes);
+            <<<num_blocks, threads_per_block, 0, infini_train::ThreadLocalStream(input->GetDevice().Index())>>>(
+                input_ptr, target_ptr, batched_loss_ptr, bs, num_classes);
         break;
     }
     case DataType::kINT64: {
         const int64_t *target_ptr = static_cast<const int64_t *>(target->DataPtr());
         CrossEntropyForwardKernel<threads_per_block, int64_t>
-            <<<num_blocks, threads_per_block>>>(input_ptr, target_ptr, batched_loss_ptr, bs, num_classes);
+            <<<num_blocks, threads_per_block, 0, infini_train::ThreadLocalStream(input->GetDevice().Index())>>>(
+                input_ptr, target_ptr, batched_loss_ptr, bs, num_classes);
         break;
     }
     default:
         LOG(FATAL) << "Unsupported target data type: " << static_cast<int>(target->Dtype());
     }
-    cudaDeviceSynchronize();
+    CHECK(cudaStreamSynchronize(infini_train::ThreadLocalStream(input->GetDevice().Index())) == cudaSuccess);
 
     auto loss_cpu = batched_output->To(Device());
     auto loss = std::make_shared<Tensor>(std::vector<int64_t>{}, DataType::kFLOAT32, Device());
@@ -114,7 +117,8 @@ std::shared_ptr<Tensor> CrossEntropyForward(const std::shared_ptr<Tensor> &input
 
 template <typename TargetType, size_t BLOCK_SIZE>
 __global__ void CrossEntropyBackwardKernel(const float *__restrict__ input_ptr, float *__restrict__ input_grad_ptr,
-                                           const TargetType *__restrict__ target_ptr, int bs, int num_classes) {
+                                           const TargetType *__restrict__ target_ptr,
+                                           const float *__restrict__ grad_output_ptr, int bs, int num_classes) {
     __shared__ struct {
         float max_logit;
         float sum_exp;
@@ -158,7 +162,7 @@ __global__ void CrossEntropyBackwardKernel(const float *__restrict__ input_ptr, 
     for (int i = tid; i < num_classes; i += BLOCK_SIZE) {
         const int global_idx = idx_base + i;
         const float exp_val = expf(input_ptr[global_idx] - shared.max_logit);
-        input_grad_ptr[global_idx] = (exp_val * scale - (i == target)) * inv_bs;
+        input_grad_ptr[global_idx] = grad_output_ptr[0] * (exp_val * scale - (i == target)) * inv_bs;
     }
 }
 
@@ -183,13 +187,17 @@ std::shared_ptr<Tensor> CrossEntropyBackward(const std::shared_ptr<Tensor> &inpu
     case DataType::kUINT8: {
         const uint8_t *target_ptr = static_cast<const uint8_t *>(target->DataPtr());
         CrossEntropyBackwardKernel<uint8_t, threads_per_block>
-            <<<num_blocks, threads_per_block>>>(input_ptr, input_grad_ptr, target_ptr, bs, num_classes);
+            <<<num_blocks, threads_per_block, 0, infini_train::ThreadLocalStream(input->GetDevice().Index())>>>(
+                input_ptr, input_grad_ptr, target_ptr, static_cast<const float *>(grad_output->DataPtr()), bs,
+                num_classes);
         break;
     }
     case DataType::kINT64: {
         const int64_t *target_ptr = static_cast<const int64_t *>(target->DataPtr());
         CrossEntropyBackwardKernel<int64_t, threads_per_block>
-            <<<num_blocks, threads_per_block>>>(input_ptr, input_grad_ptr, target_ptr, bs, num_classes);
+            <<<num_blocks, threads_per_block, 0, infini_train::ThreadLocalStream(input->GetDevice().Index())>>>(
+                input_ptr, input_grad_ptr, target_ptr, static_cast<const float *>(grad_output->DataPtr()), bs,
+                num_classes);
         break;
     }
     default:

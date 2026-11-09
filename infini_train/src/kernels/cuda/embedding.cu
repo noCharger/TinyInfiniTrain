@@ -1,5 +1,6 @@
 #include "glog/logging.h"
 
+#include "infini_train/include/cuda_utils.h"
 #include "infini_train/include/dispatcher.h"
 #include "infini_train/include/tensor.h"
 
@@ -43,7 +44,8 @@ std::shared_ptr<Tensor> EmbeddingForward(const std::shared_ptr<Tensor> &input, c
     auto output = std::make_shared<Tensor>(output_dims, DataType::kFLOAT32, input->GetDevice());
     int threads_per_block = 256;
     int num_blocks = (batch_size * max_seqlen * embed_dim + threads_per_block - 1) / threads_per_block;
-    EmbeddingForwardKernel<<<num_blocks, threads_per_block>>>(
+    EmbeddingForwardKernel<<<num_blocks, threads_per_block, 0,
+                             infini_train::ThreadLocalStream(input->GetDevice().Index())>>>(
         static_cast<const int64_t *>(input->DataPtr()), static_cast<float *>(output->DataPtr()),
         static_cast<const float *>(weight->DataPtr()), batch_size, max_seqlen, embed_dim);
     return output;
@@ -81,7 +83,8 @@ std::shared_ptr<Tensor> EmbeddingBackward(const std::shared_ptr<Tensor> &input, 
     const int threads_per_block = 256;
     const int num_blocks = (num_tokens + threads_per_block - 1) / threads_per_block;
 
-    EmbeddingBackwardKernel<<<num_blocks, threads_per_block>>>(
+    EmbeddingBackwardKernel<<<num_blocks, threads_per_block, 0,
+                              infini_train::ThreadLocalStream(input->GetDevice().Index())>>>(
         static_cast<const int64_t *>(input->DataPtr()), static_cast<const float *>(grad_output->DataPtr()),
         static_cast<float *>(grad_weight->DataPtr()), num_tokens, embedding_dim);
     return grad_weight;

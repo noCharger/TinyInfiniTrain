@@ -4,6 +4,7 @@
 #include "glog/logging.h"
 
 #include "infini_train/include/dispatcher.h"
+#include "infini_train/include/dtype.h"
 #include "infini_train/include/tensor.h"
 
 namespace infini_train::kernels::cpu {
@@ -16,9 +17,10 @@ std::shared_ptr<Tensor> TrilForward(const std::shared_ptr<Tensor> &input, int64_
         int64_t row = i / input->Dims()[1];
         int64_t col = i % input->Dims()[1];
         if (row - col + diagonal >= 0) {
-            static_cast<float *>(output->DataPtr())[i] = static_cast<float *>(input->DataPtr())[i];
+            dtype::StoreFromFloat(output->DataPtr(), output->Dtype(), i,
+                                  dtype::LoadAsFloat(input->DataPtr(), input->Dtype(), i));
         } else {
-            static_cast<float *>(output->DataPtr())[i] = 0.0;
+            dtype::StoreFromFloat(output->DataPtr(), output->Dtype(), i, 0.0f);
         }
     }
     return output;
@@ -30,9 +32,10 @@ std::shared_ptr<Tensor> TrilBackward(const std::shared_ptr<Tensor> &grad_output,
         int64_t row = i / grad_output->Dims()[1];
         int64_t col = i % grad_output->Dims()[1];
         if (row - col + diagonal >= 0) {
-            static_cast<float *>(grad_input->DataPtr())[i] = static_cast<float *>(grad_output->DataPtr())[i];
+            dtype::StoreFromFloat(grad_input->DataPtr(), grad_input->Dtype(), i,
+                                  dtype::LoadAsFloat(grad_output->DataPtr(), grad_output->Dtype(), i));
         } else {
-            static_cast<float *>(grad_input->DataPtr())[i] = 0.0;
+            dtype::StoreFromFloat(grad_input->DataPtr(), grad_input->Dtype(), i, 0.0f);
         }
     }
     return grad_input;
@@ -46,9 +49,10 @@ std::shared_ptr<Tensor> TriuForward(const std::shared_ptr<Tensor> &input, int64_
         int64_t row = i / input->Dims()[1];
         int64_t col = i % input->Dims()[1];
         if (row - col + diagonal <= 0) {
-            static_cast<float *>(output->DataPtr())[i] = static_cast<float *>(input->DataPtr())[i];
+            dtype::StoreFromFloat(output->DataPtr(), output->Dtype(), i,
+                                  dtype::LoadAsFloat(input->DataPtr(), input->Dtype(), i));
         } else {
-            static_cast<float *>(output->DataPtr())[i] = 0.0f;
+            dtype::StoreFromFloat(output->DataPtr(), output->Dtype(), i, 0.0f);
         }
     }
     return output;
@@ -62,9 +66,10 @@ std::shared_ptr<Tensor> TriuBackward(const std::shared_ptr<Tensor> &grad_output,
         int64_t row = i / grad_output->Dims()[1];
         int64_t col = i % grad_output->Dims()[1];
         if (row - col + diagonal <= 0) {
-            static_cast<float *>(grad_input->DataPtr())[i] = static_cast<float *>(grad_output->DataPtr())[i];
+            dtype::StoreFromFloat(grad_input->DataPtr(), grad_input->Dtype(), i,
+                                  dtype::LoadAsFloat(grad_output->DataPtr(), grad_output->Dtype(), i));
         } else {
-            static_cast<float *>(grad_input->DataPtr())[i] = 0.0f;
+            dtype::StoreFromFloat(grad_input->DataPtr(), grad_input->Dtype(), i, 0.0f);
         }
     }
     return grad_input;
@@ -80,9 +85,6 @@ std::shared_ptr<Tensor> TransposeForward(const std::shared_ptr<Tensor> &input, i
     std::swap(out_dims[dim0], out_dims[dim1]);
 
     auto output = std::make_shared<Tensor>(out_dims, input->Dtype(), input->GetDevice());
-
-    const float *in_ptr = static_cast<const float *>(input->DataPtr());
-    float *out_ptr = static_cast<float *>(output->DataPtr());
 
     // compute strides of in_dims and out_dims
     std::vector<int64_t> in_strides(in_dims.size(), 1);
@@ -108,7 +110,8 @@ std::shared_ptr<Tensor> TransposeForward(const std::shared_ptr<Tensor> &input, i
         int64_t out_idx = 0;
         for (int i = 0; i < out_dims.size(); ++i) { out_idx += in_index[i] * out_strides[i]; }
 
-        out_ptr[out_idx] = in_ptr[idx];
+        dtype::StoreFromFloat(output->DataPtr(), output->Dtype(), out_idx,
+                              dtype::LoadAsFloat(input->DataPtr(), input->Dtype(), idx));
     }
 
     return output;
@@ -124,13 +127,12 @@ std::shared_ptr<Tensor> MaskForward(const std::shared_ptr<Tensor> &input, const 
     CHECK_EQ(static_cast<int>(input->Dtype()), static_cast<int>(mask->Dtype()));
     auto output = std::make_shared<Tensor>(input->Dims(), input->Dtype(), input->GetDevice());
 
-    const float *in_ptr = static_cast<const float *>(input->DataPtr());
-
     for (int i = 0; i < input->NumElements(); ++i) {
-        if ((std::abs(static_cast<const float *>(mask->DataPtr())[i % mask->NumElements()] - 1.0f) < 1e-5)) {
-            static_cast<float *>(output->DataPtr())[i] = value;
+        if (std::abs(dtype::LoadAsFloat(mask->DataPtr(), mask->Dtype(), i % mask->NumElements()) - 1.0f) < 1e-5f) {
+            dtype::StoreFromFloat(output->DataPtr(), output->Dtype(), i, value);
         } else {
-            static_cast<float *>(output->DataPtr())[i] = in_ptr[i];
+            dtype::StoreFromFloat(output->DataPtr(), output->Dtype(), i,
+                                  dtype::LoadAsFloat(input->DataPtr(), input->Dtype(), i));
         }
     }
     return output;
@@ -142,10 +144,11 @@ std::shared_ptr<Tensor> MaskBackward(const std::shared_ptr<Tensor> &grad_output,
     auto grad_input = std::make_shared<Tensor>(grad_output->Dims(), grad_output->Dtype(), grad_output->GetDevice());
 
     for (int i = 0; i < grad_output->NumElements(); ++i) {
-        if ((std::abs(static_cast<const float *>(mask->DataPtr())[i % mask->NumElements()] - 1.0f) < 1e-5)) {
-            static_cast<float *>(grad_input->DataPtr())[i] = 0.0;
+        if (std::abs(dtype::LoadAsFloat(mask->DataPtr(), mask->Dtype(), i % mask->NumElements()) - 1.0f) < 1e-5f) {
+            dtype::StoreFromFloat(grad_input->DataPtr(), grad_input->Dtype(), i, 0.0f);
         } else {
-            static_cast<float *>(grad_input->DataPtr())[i] = static_cast<const float *>(grad_output->DataPtr())[i];
+            dtype::StoreFromFloat(grad_input->DataPtr(), grad_input->Dtype(), i,
+                                  dtype::LoadAsFloat(grad_output->DataPtr(), grad_output->Dtype(), i));
         }
     }
     return grad_input;
@@ -166,14 +169,15 @@ std::shared_ptr<Tensor> RepeatInterleaveForward(const std::shared_ptr<Tensor> &i
     output_dims[dim] = dim_size * repeat;
     auto output = std::make_shared<Tensor>(output_dims, input->Dtype(), input->GetDevice());
 
-    const float *input_ptr = static_cast<const float *>(input->DataPtr());
-    float *output_ptr = static_cast<float *>(output->DataPtr());
+    const size_t element_size = input->SizeInBytes() / input->NumElements();
+    const auto *input_ptr = static_cast<const uint8_t *>(input->DataPtr());
+    auto *output_ptr = static_cast<uint8_t *>(output->DataPtr());
 
     for (int64_t o = 0; o < outer; ++o) {
         for (int64_t i = 0; i < dim_size; ++i) {
             for (int r = 0; r < repeat; ++r) {
-                std::memcpy(output_ptr + ((o * dim_size * repeat + i * repeat + r) * inner),
-                            input_ptr + ((o * dim_size + i) * inner), sizeof(float) * inner);
+                std::memcpy(output_ptr + ((o * dim_size * repeat + i * repeat + r) * inner * element_size),
+                            input_ptr + ((o * dim_size + i) * inner * element_size), element_size * inner);
             }
         }
     }
@@ -197,17 +201,16 @@ std::shared_ptr<Tensor> RepeatInterleaveBackward(const std::shared_ptr<Tensor> &
     auto grad_input = std::make_shared<Tensor>(input_dims, grad_output->Dtype(), grad_output->GetDevice());
     grad_input->Fill<float>(0.0f);
 
-    const float *grad_out_ptr = static_cast<const float *>(grad_output->DataPtr());
-    float *grad_in_ptr = static_cast<float *>(grad_input->DataPtr());
-
     for (int64_t o = 0; o < outer; ++o) {
         for (int64_t i = 0; i < dim_size; ++i) {
             for (int64_t j = 0; j < inner; ++j) {
                 float sum = 0.0f;
                 for (int r = 0; r < repeat; ++r) {
-                    sum += grad_out_ptr[((o * dim_size * repeat + i * repeat + r) * inner) + j];
+                    sum += dtype::LoadAsFloat(grad_output->DataPtr(), grad_output->Dtype(),
+                                              ((o * dim_size * repeat + i * repeat + r) * inner) + j);
                 }
-                grad_in_ptr[(o * dim_size + i) * inner + j] = sum;
+                dtype::StoreFromFloat(grad_input->DataPtr(), grad_input->Dtype(),
+                                      (o * dim_size + i) * inner + j, sum);
             }
         }
     }

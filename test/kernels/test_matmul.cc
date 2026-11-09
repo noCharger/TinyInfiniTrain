@@ -3,8 +3,10 @@
 #include <memory>
 
 #include "gtest/gtest.h"
+#include "infini_train/include/dtype.h"
 #include "infini_train/include/tensor.h"
 #include "infini_train/include/device.h"
+#include "infini_train/include/autograd/linear.h"
 #include "infini_train/include/autograd/matmul.h"
 
 using namespace infini_train;
@@ -130,4 +132,105 @@ TEST(MatmulTest, BackwardPass) {
     for (int i = 0; i < std::size(expected_grad_other); ++i) {
         EXPECT_FLOAT_EQ(static_cast<float*>(output[1]->DataPtr())[i], expected_grad_other[i]);
     }
+}
+
+TEST(MatmulTest, FP16ForwardAndAutograd) {
+    auto input = std::make_shared<Tensor>(std::vector<int64_t>{2, 2}, DataType::kFLOAT16);
+    auto other = std::make_shared<Tensor>(std::vector<int64_t>{2, 2}, DataType::kFLOAT16);
+    input->RequiresGrad();
+    other->RequiresGrad();
+    auto *a = static_cast<dtype::Float16 *>(input->DataPtr());
+    auto *b = static_cast<dtype::Float16 *>(other->DataPtr());
+    a[0] = dtype::Float16(1.0f); a[1] = dtype::Float16(2.0f);
+    a[2] = dtype::Float16(3.0f); a[3] = dtype::Float16(4.0f);
+    b[0] = dtype::Float16(5.0f); b[1] = dtype::Float16(6.0f);
+    b[2] = dtype::Float16(7.0f); b[3] = dtype::Float16(8.0f);
+
+    auto output = input->Matmul(other);
+    ASSERT_EQ(output->Dtype(), DataType::kFLOAT16);
+    const auto *out = static_cast<const dtype::Float16 *>(output->DataPtr());
+    EXPECT_FLOAT_EQ(static_cast<float>(out[0]), 19.0f);
+    EXPECT_FLOAT_EQ(static_cast<float>(out[1]), 22.0f);
+    EXPECT_FLOAT_EQ(static_cast<float>(out[2]), 43.0f);
+    EXPECT_FLOAT_EQ(static_cast<float>(out[3]), 50.0f);
+
+    output->Backward();
+    const auto *grad_a = static_cast<const dtype::Float16 *>(input->grad()->DataPtr());
+    const auto *grad_b = static_cast<const dtype::Float16 *>(other->grad()->DataPtr());
+    EXPECT_FLOAT_EQ(static_cast<float>(grad_a[0]), 11.0f);
+    EXPECT_FLOAT_EQ(static_cast<float>(grad_a[1]), 15.0f);
+    EXPECT_FLOAT_EQ(static_cast<float>(grad_a[2]), 11.0f);
+    EXPECT_FLOAT_EQ(static_cast<float>(grad_a[3]), 15.0f);
+    EXPECT_FLOAT_EQ(static_cast<float>(grad_b[0]), 4.0f);
+    EXPECT_FLOAT_EQ(static_cast<float>(grad_b[1]), 4.0f);
+    EXPECT_FLOAT_EQ(static_cast<float>(grad_b[2]), 6.0f);
+    EXPECT_FLOAT_EQ(static_cast<float>(grad_b[3]), 6.0f);
+}
+
+TEST(MatmulTest, BF16BatchedForward) {
+    auto input = std::make_shared<Tensor>(std::vector<int64_t>{2, 1, 2}, DataType::kBFLOAT16);
+    auto other = std::make_shared<Tensor>(std::vector<int64_t>{2, 2, 1}, DataType::kBFLOAT16);
+    auto *a = static_cast<dtype::BFloat16 *>(input->DataPtr());
+    auto *b = static_cast<dtype::BFloat16 *>(other->DataPtr());
+    a[0] = dtype::BFloat16(1.0f); a[1] = dtype::BFloat16(2.0f);
+    a[2] = dtype::BFloat16(3.0f); a[3] = dtype::BFloat16(4.0f);
+    b[0] = dtype::BFloat16(5.0f); b[1] = dtype::BFloat16(6.0f);
+    b[2] = dtype::BFloat16(7.0f); b[3] = dtype::BFloat16(8.0f);
+
+    auto output = input->Matmul(other);
+    ASSERT_EQ(output->Dtype(), DataType::kBFLOAT16);
+    const auto *out = static_cast<const dtype::BFloat16 *>(output->DataPtr());
+    EXPECT_FLOAT_EQ(static_cast<float>(out[0]), 17.0f);
+    EXPECT_FLOAT_EQ(static_cast<float>(out[1]), 53.0f);
+}
+
+TEST(MatmulTest, BF16LinearForwardAndBackward) {
+    auto input = std::make_shared<Tensor>(std::vector<int64_t>{2, 2}, DataType::kBFLOAT16)->RequiresGrad();
+    auto weight = std::make_shared<Tensor>(std::vector<int64_t>{2, 2}, DataType::kBFLOAT16)->RequiresGrad();
+    auto bias = std::make_shared<Tensor>(std::vector<int64_t>{2}, DataType::kBFLOAT16)->RequiresGrad();
+    auto *x = static_cast<dtype::BFloat16 *>(input->DataPtr());
+    auto *w = static_cast<dtype::BFloat16 *>(weight->DataPtr());
+    x[0] = dtype::BFloat16(1.0f); x[1] = dtype::BFloat16(2.0f);
+    x[2] = dtype::BFloat16(3.0f); x[3] = dtype::BFloat16(4.0f);
+    w[0] = dtype::BFloat16(1.0f); w[1] = dtype::BFloat16(2.0f);
+    w[2] = dtype::BFloat16(3.0f); w[3] = dtype::BFloat16(4.0f);
+    bias->Fill<float>(1.0f);
+
+    auto output = std::make_shared<autograd::Linear>()->Apply({input, weight, bias})[0];
+    ASSERT_EQ(output->Dtype(), DataType::kBFLOAT16);
+    const auto *y = static_cast<const dtype::BFloat16 *>(output->DataPtr());
+    EXPECT_FLOAT_EQ(static_cast<float>(y[0]), 6.0f);
+    EXPECT_FLOAT_EQ(static_cast<float>(y[1]), 12.0f);
+    EXPECT_FLOAT_EQ(static_cast<float>(y[2]), 12.0f);
+    EXPECT_FLOAT_EQ(static_cast<float>(y[3]), 26.0f);
+
+    output->Backward();
+    const auto *gx = static_cast<const dtype::BFloat16 *>(input->grad()->DataPtr());
+    const auto *gw = static_cast<const dtype::BFloat16 *>(weight->grad()->DataPtr());
+    const auto *gb = static_cast<const dtype::BFloat16 *>(bias->grad()->DataPtr());
+    EXPECT_FLOAT_EQ(static_cast<float>(gx[0]), 4.0f);
+    EXPECT_FLOAT_EQ(static_cast<float>(gx[1]), 6.0f);
+    EXPECT_FLOAT_EQ(static_cast<float>(gx[2]), 4.0f);
+    EXPECT_FLOAT_EQ(static_cast<float>(gx[3]), 6.0f);
+    EXPECT_FLOAT_EQ(static_cast<float>(gw[0]), 4.0f);
+    EXPECT_FLOAT_EQ(static_cast<float>(gw[1]), 6.0f);
+    EXPECT_FLOAT_EQ(static_cast<float>(gw[2]), 4.0f);
+    EXPECT_FLOAT_EQ(static_cast<float>(gw[3]), 6.0f);
+    EXPECT_FLOAT_EQ(static_cast<float>(gb[0]), 2.0f);
+    EXPECT_FLOAT_EQ(static_cast<float>(gb[1]), 2.0f);
+}
+
+TEST(MatmulTest, CreateGraphSupportsBatchedInputSecondDerivative) {
+    auto input = std::make_shared<Tensor>(std::vector<int64_t>{2, 1, 1}, DataType::kFLOAT32)->RequiresGrad();
+    auto weight = std::make_shared<Tensor>(std::vector<int64_t>{1, 1}, DataType::kFLOAT32)->RequiresGrad();
+    static_cast<float *>(input->DataPtr())[0] = 1.0f;
+    static_cast<float *>(input->DataPtr())[1] = 2.0f;
+    static_cast<float *>(weight->DataPtr())[0] = 3.0f;
+
+    auto output = input->Matmul(weight);
+    output->Backward(nullptr, false, true);
+    ASSERT_TRUE(input->grad()->requires_grad());
+    weight->ZeroGrad();
+    input->grad()->Backward();
+    EXPECT_FLOAT_EQ(static_cast<float *>(weight->grad()->DataPtr())[0], 2.0f);
 }

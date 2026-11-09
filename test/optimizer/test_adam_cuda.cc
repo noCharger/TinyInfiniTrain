@@ -5,6 +5,7 @@
 #include "cuda_runtime_api.h"
 
 #include "gtest/gtest.h"
+#include "infini_train/include/dtype.h"
 #include "infini_train/include/tensor.h"
 #include "infini_train/include/device.h"
 #include "infini_train/include/optimizer.h"
@@ -17,10 +18,7 @@ TEST(AdamOptimizerTest, BasicParameterUpdateCuda) {
     param->Fill(1.0f); // 初始参数值 [1.0, 1.0, 1.0]
     param->RequiresGrad();
     
-    auto grad = std::make_shared<Tensor>(param->Dims(), param->Dtype());
-    grad->Fill(1.0f);
-    float* grad_data = static_cast<float*>(param->grad()->DataPtr());
-    cudaMemcpy(grad_data, grad->DataPtr(), grad->SizeInBytes(), cudaMemcpyDefault);
+    param->grad()->Fill(1.0f);
 
     optimizers::Adam optimizer({param}, 0.001f, 0.9f, 0.999f, 1e-8);
 
@@ -64,5 +62,22 @@ TEST(AdamOptimizerTest, MomentumAccumulationCuda) {
         expected_update -= learning_rate * m_hat / (std::sqrt(v_hat) + 1e-8f);
         EXPECT_NEAR(param_history[t-1] - 1.0f, expected_update, 1e-5);
     }
+}
+
+TEST(AdamOptimizerTest, BF16MasterWeightCuda) {
+    auto param = std::make_shared<Tensor>(std::vector<int64_t>{1}, DataType::kBFLOAT16,
+        Device(DeviceType::kCUDA, 0));
+    param->Fill(1.0f);
+    param->RequiresGrad();
+    param->grad()->Fill(1.0f);
+
+    optimizers::Adam optimizer({param}, 0.001f);
+    for (int step = 0; step < 8; ++step) optimizer.Step();
+
+    auto param_cpu = param->To(Device(DeviceType::kCPU, 0));
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    const float value = static_cast<float>(static_cast<dtype::BFloat16 *>(param_cpu.DataPtr())[0]);
+    EXPECT_LT(value, 1.0f);
+    EXPECT_NEAR(value, 0.992f, 0.004f);
 }
 #endif

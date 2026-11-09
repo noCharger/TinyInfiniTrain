@@ -1,6 +1,7 @@
 #include "cuda_runtime.h"
 #include "glog/logging.h"
 
+#include "infini_train/include/cuda_utils.h"
 #include "infini_train/include/dispatcher.h"
 #include "infini_train/include/tensor.h"
 
@@ -32,8 +33,9 @@ std::shared_ptr<Tensor> TrilForward(const std::shared_ptr<Tensor> &input, int64_
     int threads_per_block = 256;
     int num_blocks = (rows * cols + threads_per_block - 1) / threads_per_block;
 
-    TrilForwardKernel<<<num_blocks, threads_per_block>>>(static_cast<float *>(input->DataPtr()),
-                                                         static_cast<float *>(output->DataPtr()), rows, cols, diagonal);
+    TrilForwardKernel<<<num_blocks, threads_per_block, 0,
+                        infini_train::ThreadLocalStream(input->GetDevice().Index())>>>(
+        static_cast<float *>(input->DataPtr()), static_cast<float *>(output->DataPtr()), rows, cols, diagonal);
     return output;
 }
 
@@ -63,9 +65,10 @@ std::shared_ptr<Tensor> TrilBackward(const std::shared_ptr<Tensor> &grad_output,
     int threads_per_block = 256;
     int num_blocks = (rows * cols + threads_per_block - 1) / threads_per_block;
 
-    TrilBackwardKernel<<<num_blocks, threads_per_block>>>(static_cast<const float *>(grad_output->DataPtr()),
-                                                          static_cast<float *>(grad_input->DataPtr()), rows, cols,
-                                                          diagonal);
+    TrilBackwardKernel<<<num_blocks, threads_per_block, 0,
+                         infini_train::ThreadLocalStream(grad_output->GetDevice().Index())>>>(
+        static_cast<const float *>(grad_output->DataPtr()), static_cast<float *>(grad_input->DataPtr()), rows, cols,
+        diagonal);
 
     return grad_input;
 }
@@ -96,8 +99,9 @@ std::shared_ptr<Tensor> TriuForward(const std::shared_ptr<Tensor> &input, int64_
     int threads_per_block = 256;
     int num_blocks = (rows * cols + threads_per_block - 1) / threads_per_block;
 
-    TriuForwardKernel<<<num_blocks, threads_per_block>>>(static_cast<const float *>(input->DataPtr()),
-                                                         static_cast<float *>(output->DataPtr()), rows, cols, diagonal);
+    TriuForwardKernel<<<num_blocks, threads_per_block, 0,
+                        infini_train::ThreadLocalStream(input->GetDevice().Index())>>>(
+        static_cast<const float *>(input->DataPtr()), static_cast<float *>(output->DataPtr()), rows, cols, diagonal);
 
     return output;
 }
@@ -128,9 +132,10 @@ std::shared_ptr<Tensor> TriuBackward(const std::shared_ptr<Tensor> &grad_output,
     int threads_per_block = 256;
     int num_blocks = (rows * cols + threads_per_block - 1) / threads_per_block;
 
-    TriuBackwardKernel<<<num_blocks, threads_per_block>>>(static_cast<const float *>(grad_output->DataPtr()),
-                                                          static_cast<float *>(grad_input->DataPtr()), rows, cols,
-                                                          diagonal);
+    TriuBackwardKernel<<<num_blocks, threads_per_block, 0,
+                         infini_train::ThreadLocalStream(grad_output->GetDevice().Index())>>>(
+        static_cast<const float *>(grad_output->DataPtr()), static_cast<float *>(grad_input->DataPtr()), rows, cols,
+        diagonal);
 
     return grad_input;
 }
@@ -189,7 +194,8 @@ std::shared_ptr<Tensor> TransposeForward(const std::shared_ptr<Tensor> &input, i
 
     // Allocate device memory for dims and strides
     int64_t *device_buffer;
-    cudaMallocAsync(&device_buffer, 3 * ndim * sizeof(int64_t), 0);
+    const cudaStream_t stream = infini_train::ThreadLocalStream(input->GetDevice().Index());
+    cudaMallocAsync(&device_buffer, 3 * ndim * sizeof(int64_t), stream);
 
     int64_t *in_dims_dev = device_buffer;
     int64_t *in_strides_dev = device_buffer + ndim;
@@ -200,16 +206,17 @@ std::shared_ptr<Tensor> TransposeForward(const std::shared_ptr<Tensor> &input, i
     host_buffer.insert(host_buffer.end(), in_strides.begin(), in_strides.end());
     host_buffer.insert(host_buffer.end(), out_strides.begin(), out_strides.end());
 
-    cudaMemcpyAsync(device_buffer, host_buffer.data(), 3 * ndim * sizeof(int64_t), cudaMemcpyHostToDevice, 0);
+    cudaMemcpyAsync(device_buffer, host_buffer.data(), 3 * ndim * sizeof(int64_t), cudaMemcpyHostToDevice, stream);
+    CHECK(cudaStreamSynchronize(stream) == cudaSuccess);
 
     int threads_per_block = 256;
     int num_blocks = (num_elements + threads_per_block - 1) / threads_per_block;
 
-    TransposeForwardKernel<<<num_blocks, threads_per_block>>>(
+    TransposeForwardKernel<<<num_blocks, threads_per_block, 0, stream>>>(
         static_cast<const float *>(input->DataPtr()), static_cast<float *>(output->DataPtr()), in_dims_dev,
         in_strides_dev, out_strides_dev, ndim, dim0, dim1, num_elements);
 
-    cudaFreeAsync(device_buffer, 0);
+    cudaFreeAsync(device_buffer, stream);
 
     return output;
 }
@@ -248,7 +255,8 @@ std::shared_ptr<Tensor> MaskForward(const std::shared_ptr<Tensor> &input, const 
     int threads_per_block = 256;
     int num_blocks = (input->NumElements() + threads_per_block - 1) / threads_per_block;
 
-    MaskForwardKernel<<<num_blocks, threads_per_block>>>(
+    MaskForwardKernel<<<num_blocks, threads_per_block, 0,
+                        infini_train::ThreadLocalStream(input->GetDevice().Index())>>>(
         static_cast<const float *>(input->DataPtr()), static_cast<const float *>(mask->DataPtr()),
         static_cast<float *>(output->DataPtr()), value, batch_size, mask_size);
     return output;
@@ -284,7 +292,8 @@ std::shared_ptr<Tensor> MaskBackward(const std::shared_ptr<Tensor> &grad_output,
     int threads_per_block = 256;
     int num_blocks = (grad_output->NumElements() + threads_per_block - 1) / threads_per_block;
 
-    MaskBackwardKernel<<<num_blocks, threads_per_block>>>(
+    MaskBackwardKernel<<<num_blocks, threads_per_block, 0,
+                         infini_train::ThreadLocalStream(grad_output->GetDevice().Index())>>>(
         static_cast<const float *>(grad_output->DataPtr()), static_cast<const float *>(mask->DataPtr()),
         static_cast<float *>(grad_input->DataPtr()), batch_size, mask_size);
     return grad_input;
@@ -328,8 +337,9 @@ std::shared_ptr<Tensor> RepeatInterleaveForward(const std::shared_ptr<Tensor> &i
     int64_t total_elements = outer * dim_size * repeat * inner;
     int threads_per_block = 256;
     int num_blocks = (total_elements + threads_per_block - 1) / threads_per_block;
-    RepeatInterleaveForwardKernel<<<num_blocks, threads_per_block>>>(input_ptr, output_ptr, outer, dim_size, inner,
-                                                                     repeat);
+    RepeatInterleaveForwardKernel<<<num_blocks, threads_per_block, 0,
+                                    infini_train::ThreadLocalStream(input->GetDevice().Index())>>>(
+        input_ptr, output_ptr, outer, dim_size, inner, repeat);
 
     return output;
 }
@@ -378,8 +388,9 @@ std::shared_ptr<Tensor> RepeatInterleaveBackward(const std::shared_ptr<Tensor> &
     int64_t total_elements = outer * dim_size * inner;
     int threads_per_block = 256;
     int num_blocks = (total_elements + threads_per_block - 1) / threads_per_block;
-    RepeatInterleaveBackwardKernel<<<num_blocks, threads_per_block>>>(grad_out_ptr, grad_in_ptr, outer, dim_size, inner,
-                                                                      repeat);
+    RepeatInterleaveBackwardKernel<<<num_blocks, threads_per_block, 0,
+                                     infini_train::ThreadLocalStream(grad_output->GetDevice().Index())>>>(
+        grad_out_ptr, grad_in_ptr, outer, dim_size, inner, repeat);
 
     return grad_input;
 }

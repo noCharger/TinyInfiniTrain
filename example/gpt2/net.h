@@ -16,6 +16,25 @@ struct GPT2Config {
     int64_t n_layer = 12;
     int64_t n_head = 12;
     int64_t n_embd = 768;
+    infini_train::DataType dtype = infini_train::DataType::kFLOAT32;
+
+    // Recompute each local Transformer block during backward instead of
+    // retaining its attention/MLP intermediates from the original forward.
+    bool activation_recomputation = false;
+
+    // Tensor parallelism: split attention heads and MLP hidden dim across tp_size ranks.
+    // TP=1 (default) disables all collective ops and is identical to the original code.
+    // Megatron-LM analogue: TransformerConfig.tensor_model_parallel_size
+    int tp_size = 1;
+
+    // Pipeline parallelism: divide the n_layer transformer blocks across pp_size stages.
+    // PP=1 (default) keeps all layers on one process.
+    // pre_process / post_process mirror Megatron's GPTModel flags:
+    //   pre_process=true  → this stage owns Embedding (wte, wpe)
+    //   post_process=true → this stage owns ln_f and lm_head
+    int pp_size = 1;
+    bool pre_process = true;
+    bool post_process = true;
 };
 
 class NewGELU : public infini_train::nn::Module {
@@ -53,6 +72,9 @@ public:
 
     std::vector<std::shared_ptr<infini_train::Tensor>>
     Forward(const std::vector<std::shared_ptr<infini_train::Tensor>> &x) override;
+
+private:
+    int tp_size_ = 1;
 };
 
 class Block : public infini_train::nn::Module {
@@ -89,9 +111,23 @@ public:
     std::vector<std::shared_ptr<infini_train::Tensor>>
     Forward(const std::vector<std::shared_ptr<infini_train::Tensor>> &x) override;
 
+    void To(infini_train::Device device) override;
+
+    // PP first/last stages own separate physical copies of the tied token
+    // embedding / lm_head weight. These collectives establish identical
+    // initial values and sum their gradients before an optimizer update.
+    void SynchronizeTiedEmbeddingWeights();
+    void SynchronizeTiedEmbeddingGradients();
+
+    const GPT2Config &Config() const { return config_; }
+
     static std::unique_ptr<GPT2> FromPretrained(ModelType model_type);
     static std::unique_ptr<GPT2> FromLLMC(const std::string &filepath);
 
 private:
     GPT2Config config_;
+    // PP layer range owned by this stage: [stage_layer_start_, stage_layer_end_).
+    // Both equal 0..n_layer when pp_size == 1.
+    int64_t stage_layer_start_ = 0;
+    int64_t stage_layer_end_ = 0;
 };

@@ -4,6 +4,7 @@
 #include "cublas_v2.h"
 #include "glog/logging.h"
 
+#include "infini_train/include/cuda_utils.h"
 #include "infini_train/include/dispatcher.h"
 #include "infini_train/include/tensor.h"
 
@@ -47,14 +48,14 @@ std::shared_ptr<Tensor> OuterForward(const std::shared_ptr<Tensor> &input, const
     // output.T[N, M] = other[N, 1] * input.T[1, M]
     float alpha = 1.0f;
     float beta = 0.0f;
-    cublasHandle_t handle;
-    CUBLAS_CHECK(cublasCreate(&handle));
+    const cudaStream_t stream = infini_train::ThreadLocalStream(input->GetDevice().Index());
+    cublasHandle_t handle = infini_train::GetCublasHandle(input->GetDevice().Index());
+    CUBLAS_CHECK(cublasSetStream(handle, stream));
 
     CUBLAS_CHECK(cublasSgemm(
         handle, CUBLAS_OP_N, CUBLAS_OP_N, N, M, 1, &alpha, static_cast<const float *>(other->DataPtr()), N,
         static_cast<const float *>(input->DataPtr()), 1, &beta, static_cast<float *>(output->DataPtr()), N));
 
-    CUBLAS_CHECK(cublasDestroy(handle));
     return output;
 }
 
@@ -78,8 +79,9 @@ std::tuple<std::shared_ptr<Tensor>, std::shared_ptr<Tensor>> OuterBackward(const
 
     float alpha = 1.0f;
     float beta = 0.0f;
-    cublasHandle_t handle;
-    CUBLAS_CHECK(cublasCreate(&handle));
+    const cudaStream_t stream = infini_train::ThreadLocalStream(grad_output->GetDevice().Index());
+    cublasHandle_t handle = infini_train::GetCublasHandle(grad_output->GetDevice().Index());
+    CUBLAS_CHECK(cublasSetStream(handle, stream));
 
     // grad_input[M, 1] = grad_output[M, N] × other[N, 1]
     // y = grad_input[M]
@@ -97,7 +99,6 @@ std::tuple<std::shared_ptr<Tensor>, std::shared_ptr<Tensor>> OuterBackward(const
                              static_cast<const float *>(input->DataPtr()), 1, &beta,
                              static_cast<float *>(grad_other->DataPtr()), 1));
 
-    CUBLAS_CHECK(cublasDestroy(handle));
     return {grad_input, grad_other};
 }
 

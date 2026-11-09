@@ -3,6 +3,7 @@
 
 #include "glog/logging.h"
 
+#include "infini_train/include/cuda_utils.h"
 #include "infini_train/include/dispatcher.h"
 #include "infini_train/include/tensor.h"
 
@@ -142,7 +143,8 @@ std::shared_ptr<Tensor> ReduceOpForward(const std::shared_ptr<Tensor> &input, co
     int num_blocks = N * W;
 
     GenericReduceKernel<ReduceFunc, FinalizeOp, BLOCK_SIZE>
-        <<<num_blocks, threads_per_block>>>(input_ptr, output_ptr, N, H, W, finalize_op);
+        <<<num_blocks, threads_per_block, 0, infini_train::ThreadLocalStream(input->GetDevice().Index())>>>(
+            input_ptr, output_ptr, N, H, W, finalize_op);
 
     return output;
 }
@@ -171,8 +173,9 @@ std::shared_ptr<Tensor> ReduceOpBackward(const std::shared_ptr<Tensor> &grad_out
     int threads_per_block = 256;
     int num_blocks = (N * H * W + threads_per_block - 1) / threads_per_block;
 
-    GenericReduceBackwardKernel<<<num_blocks, threads_per_block>>>(grad_input_ptr, grad_output_ptr, input_ptr,
-                                                                   reduced_ptr, N, H, W, is_mean, is_masked);
+    GenericReduceBackwardKernel<<<num_blocks, threads_per_block, 0,
+                                  infini_train::ThreadLocalStream(grad_output->GetDevice().Index())>>>(
+        grad_input_ptr, grad_output_ptr, input_ptr, reduced_ptr, N, H, W, is_mean, is_masked);
 
     return grad_input;
 }

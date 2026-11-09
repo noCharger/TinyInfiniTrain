@@ -167,4 +167,32 @@ std::shared_ptr<Tensor> Slice(const std::shared_ptr<Tensor> &input, const std::v
 //   Concatenation of the input tensors.
 std::shared_ptr<Tensor> Stack(const std::vector<std::shared_ptr<Tensor>> &inputs, int64_t dim = 0);
 
+// RMS-normalizes the last dimension and applies a learned per-channel weight.
+std::shared_ptr<Tensor> RMSNorm(const std::shared_ptr<Tensor> &input,
+                                const std::shared_ptr<Tensor> &weight, float eps = 1e-6f);
+
+// Applies split-half rotary position embeddings. cos/sin are [seq, hidden/2]
+// or [hidden/2] and use the same dtype/device as input.
+std::shared_ptr<Tensor> RoPE(const std::shared_ptr<Tensor> &input,
+                            const std::shared_ptr<Tensor> &cos,
+                            const std::shared_ptr<Tensor> &sin);
+
+// Splits the final dimension into [gate, up] halves and returns
+// SiLU(gate) * up.
+std::shared_ptr<Tensor> SwiGLU(const std::shared_ptr<Tensor> &input);
+
+// Returns a power-of-two dynamic scaling factor that maps the tensor's amax
+// into E4M3's finite range (448), with an optional exponent margin.
+float FP8DynamicScale(const std::shared_ptr<Tensor> &input, int margin = 0);
+
+// Quantize/dequantize through physical E4M3 values while preserving the input
+// compute dtype. Backward is a straight-through estimator.
+std::shared_ptr<Tensor> FP8FakeQuantize(const std::shared_ptr<Tensor> &input, float scale = 0.0f);
+
+// Dynamically scaled FP8 operands with FP32 accumulation in the existing matmul
+// kernels. Passing scale <= 0 derives a power-of-two scale from each operand.
+std::shared_ptr<Tensor> FP8Matmul(const std::shared_ptr<Tensor> &input,
+                                 const std::shared_ptr<Tensor> &other,
+                                 float input_scale = 0.0f, float other_scale = 0.0f);
+
 } // namespace infini_train::nn::function

@@ -6,6 +6,7 @@
 
 #include "glog/logging.h"
 
+#include "infini_train/include/cuda_utils.h"
 #include "infini_train/include/dispatcher.h"
 #include "infini_train/include/tensor.h"
 
@@ -99,7 +100,8 @@ void LaunchForward(const std::shared_ptr<Tensor> &output, const std::shared_ptr<
     dim3 grid_dims(outer_size, inner_size);
 
     SoftmaxForwardKernel<BLOCK_SIZE, T>
-        <<<grid_dims, block_dims>>>(output_ptr, input_ptr, outer_size, axis_size, inner_size);
+        <<<grid_dims, block_dims, 0, infini_train::ThreadLocalStream(input->GetDevice().Index())>>>(
+            output_ptr, input_ptr, outer_size, axis_size, inner_size);
 }
 
 std::shared_ptr<Tensor> SoftmaxForward(const std::shared_ptr<Tensor> &input, int64_t dim) {
@@ -181,7 +183,8 @@ void LaunchBackward(const std::shared_ptr<Tensor> &grad_input, const std::shared
     dim3 grid(outer_size, inner_size);
 
     SoftmaxBackwardKernel<BLOCK_SIZE, T>
-        <<<grid, block>>>(grad_input_ptr, grad_output_ptr, output_ptr, outer_size, axis_size, inner_size);
+        <<<grid, block, 0, infini_train::ThreadLocalStream(output->GetDevice().Index())>>>(
+            grad_input_ptr, grad_output_ptr, output_ptr, outer_size, axis_size, inner_size);
 }
 
 std::shared_ptr<Tensor> SoftmaxBackward(const std::shared_ptr<Tensor> &grad_output,

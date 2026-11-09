@@ -3,6 +3,7 @@
 #include "glog/logging.h"
 
 #include "infini_train/include/dispatcher.h"
+#include "infini_train/include/autograd/reduction.h"
 #include "infini_train/include/tensor.h"
 
 namespace infini_train::autograd {
@@ -32,6 +33,18 @@ std::vector<std::shared_ptr<Tensor>> Linear::Backward(const std::vector<std::sha
     const auto &weight = saved_tensors_[1];
     CHECK_EQ(grad_outputs.size(), 1);
     const auto &grad_output = grad_outputs[0];
+
+    if (IsCreateGraphEnabled()) {
+        const int64_t in_features = input->Dims().back();
+        const int64_t rows = static_cast<int64_t>(input->NumElements()) / in_features;
+        auto input_2d = input->View({rows, in_features});
+        auto grad_2d = grad_output->View({rows, out_features_});
+        auto grad_input = grad_2d->Matmul(weight)->View(input->Dims());
+        auto grad_weight = grad_2d->Transpose(0, 1)->Matmul(input_2d);
+        if (!bias_) return {grad_input, grad_weight};
+        auto grad_bias = std::make_shared<Sum>(0, false)->Apply({grad_2d})[0];
+        return {grad_input, grad_weight, grad_bias};
+    }
 
     auto device = input->GetDevice().Type();
     auto kernel = Dispatcher::Instance().GetKernel({device, "LinearBackward"});

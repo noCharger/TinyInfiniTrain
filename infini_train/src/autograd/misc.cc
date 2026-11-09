@@ -6,6 +6,41 @@
 #include "infini_train/include/tensor.h"
 
 namespace infini_train::autograd {
+std::vector<std::shared_ptr<Tensor>> Cast::Forward(
+    const std::vector<std::shared_ptr<Tensor>> &input_tensors) {
+    CHECK_EQ(input_tensors.size(), 1u);
+    const auto &input = input_tensors[0];
+    auto kernel = Dispatcher::Instance().GetKernel({input->GetDevice().Type(), "CastForward"});
+    return {kernel.Call<std::shared_ptr<Tensor>>(input, output_dtype_)};
+}
+
+void Cast::SetupContext(const std::vector<std::shared_ptr<Tensor>> &input_tensors,
+                        const std::vector<std::shared_ptr<Tensor>> &) {
+    input_dtype_ = input_tensors[0]->Dtype();
+}
+
+std::vector<std::shared_ptr<Tensor>> Cast::Backward(
+    const std::vector<std::shared_ptr<Tensor>> &grad_outputs) {
+    CHECK_EQ(grad_outputs.size(), 1u);
+    if (IsCreateGraphEnabled()) { return {grad_outputs[0]->Cast(input_dtype_)}; }
+    auto kernel = Dispatcher::Instance().GetKernel({grad_outputs[0]->GetDevice().Type(), "CastForward"});
+    return {kernel.Call<std::shared_ptr<Tensor>>(grad_outputs[0], input_dtype_)};
+}
+
+std::vector<std::shared_ptr<Tensor>> FP8FakeQuantize::Forward(
+    const std::vector<std::shared_ptr<Tensor>> &input_tensors) {
+    CHECK_EQ(input_tensors.size(), 1u);
+    const auto &input = input_tensors[0];
+    auto kernel = Dispatcher::Instance().GetKernel({input->GetDevice().Type(), "FP8FakeQuantizeForward"});
+    return {kernel.Call<std::shared_ptr<Tensor>>(input, scale_)};
+}
+
+std::vector<std::shared_ptr<Tensor>> FP8FakeQuantize::Backward(
+    const std::vector<std::shared_ptr<Tensor>> &grad_outputs) {
+    CHECK_EQ(grad_outputs.size(), 1u);
+    return {grad_outputs[0]};
+}
+
 std::vector<std::shared_ptr<Tensor>> Split::Forward(const std::vector<std::shared_ptr<Tensor>> &input_tensors) {
     CHECK_EQ(input_tensors.size(), 1);
     const auto &input = input_tensors[0];

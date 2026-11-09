@@ -10,15 +10,16 @@
 #include "infini_train/include/tensor.h"
 
 namespace infini_train::nn {
-Linear::Linear(int64_t in_features, int64_t out_features, bool bias, Device device) : Module(kType), bias_(bias) {
+Linear::Linear(int64_t in_features, int64_t out_features, bool bias, Device device, DataType dtype)
+    : Module(kType), bias_(bias) {
     device_ = device;
 
     parameters_[kParamWeightName]
-        = std::make_shared<Tensor>(std::vector<int64_t>{out_features, in_features}, DataType::kFLOAT32, device)
+        = std::make_shared<Tensor>(std::vector<int64_t>{out_features, in_features}, dtype, device)
               ->RequiresGrad();
     if (bias) {
         parameters_[kParamBiasName]
-            = std::make_shared<Tensor>(std::vector<int64_t>{out_features}, DataType::kFLOAT32, device)->RequiresGrad();
+            = std::make_shared<Tensor>(std::vector<int64_t>{out_features}, dtype, device)->RequiresGrad();
     }
     ResetParameters();
 }

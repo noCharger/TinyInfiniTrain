@@ -42,6 +42,7 @@ enum class DataType : int8_t {
     kINT32,
     kUINT64,
     kINT64,
+    kFLOAT8_E4M3,
     kBFLOAT16,
     kFLOAT16,
     kFLOAT32,
@@ -84,12 +85,27 @@ public:
     size_t NumElements() const;
     DataType Dtype() const;
 
+    // Storage lifecycle hooks used by ZeRO-3. Logical metadata survives while
+    // the full backing allocation is absent, allowing the Tensor object held
+    // by a Module to be materialized before forward and released after update.
+    bool HasStorage() const { return static_cast<bool>(buffer_); }
+    void AllocateStorage();
+    void ReleaseStorage();
+
     template <typename T> void Fill(T value);
 
     Eigen::Map<Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>> EigenMatrix();
     Eigen::Map<Eigen::Matrix<float, 1, Eigen::Dynamic, Eigen::RowMajor>> EigenVector();
 
     Tensor To(Device device);
+    std::shared_ptr<Tensor> Cast(DataType dtype);
+
+    // Deep-copies this tensor's data into a freshly allocated, independent buffer
+    // on the same device (unlike To(same_device), which aliases the source buffer).
+    // The clone is a plain data snapshot: requires_grad_/grad_/grad_fn_ are NOT
+    // copied, since callers (e.g. PipeDream-style weight stashing) only need the
+    // raw values, not a live autograd node.
+    std::shared_ptr<Tensor> Clone() const;
 
     // operator overloading
     std::shared_ptr<Tensor> Equals(float scalar);
@@ -154,6 +170,7 @@ public:
 
 private:
     std::shared_ptr<TensorBuffer> buffer_;
+    Device device_;
     size_t offset_ = 0;
     std::vector<int64_t> dims_;
     size_t num_elements_ = 0;
@@ -177,6 +194,11 @@ public:
     void set_output_idx(int output_idx) { output_idx_ = output_idx; }
 
     void ZeroGrad();
+    void ReleaseGrad() { grad_.reset(); }
+
+    // Internal autograd hook. Public so the engine's leaf accumulator can update
+    // the gradient without exposing Tensor's storage fields.
+    void AccumulateGrad(const std::shared_ptr<Tensor> &gradient, bool create_graph);
 
     void Backward(std::shared_ptr<Tensor> gradient = nullptr, bool retain_graph = false,
                   bool create_graph = false) const;

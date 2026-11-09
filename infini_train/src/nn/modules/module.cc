@@ -1,19 +1,29 @@
 #include "infini_train/include/nn/modules/module.h"
 
 #include <memory>
+#include <unordered_set>
 #include <vector>
 
 #include "infini_train/include/device.h"
 #include "infini_train/include/tensor.h"
 
 namespace infini_train::nn {
+namespace {
+thread_local std::unordered_map<const Tensor *, std::shared_ptr<Tensor>> *g_device_move_cache = nullptr;
+}
+
 const std::string &Module::type() const { return type_; }
 
 std::vector<std::shared_ptr<Tensor>> Module::Parameters() const {
-    std::vector<std::shared_ptr<Tensor>> params;
-    for (auto &[_, param] : parameters_) { params.push_back(param); }
+    std::vector<std::shared_ptr<Tensor>> candidates;
+    for (auto &[_, param] : parameters_) { candidates.push_back(param); }
     for (auto &[_, layer] : modules_) {
-        for (auto &param : layer->Parameters()) { params.push_back(param); }
+        for (auto &param : layer->Parameters()) { candidates.push_back(param); }
+    }
+    std::vector<std::shared_ptr<Tensor>> params;
+    std::unordered_set<const Tensor *> seen;
+    for (auto &param : candidates) {
+        if (seen.insert(param.get()).second) params.push_back(std::move(param));
     }
     return params;
 }
@@ -60,14 +70,24 @@ void Module::To(Device device) {
         return;
     }
 
+    std::unordered_map<const Tensor *, std::shared_ptr<Tensor>> root_cache;
+    const bool is_root_move = g_device_move_cache == nullptr;
+    if (is_root_move) g_device_move_cache = &root_cache;
+
     std::unordered_map<std::string, std::shared_ptr<Tensor>> new_parameters;
     for (auto &[name, param] : parameters_) {
-        new_parameters.emplace(name, std::make_shared<Tensor>(param->To(device)));
+        auto it = g_device_move_cache->find(param.get());
+        if (it == g_device_move_cache->end()) {
+            auto moved = std::make_shared<Tensor>(param->To(device));
+            it = g_device_move_cache->emplace(param.get(), std::move(moved)).first;
+        }
+        new_parameters.emplace(name, it->second);
     }
     parameters_ = std::move(new_parameters);
     device_ = device;
 
     for (auto &[_, layer] : modules_) { layer->To(device); }
+    if (is_root_move) g_device_move_cache = nullptr;
 }
 
 void Module::Apply(std::function<void(Module *)> fn) {

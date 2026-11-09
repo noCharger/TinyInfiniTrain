@@ -8,6 +8,7 @@
 
 #include "infini_train/include/device.h"
 #include "infini_train/include/dispatcher.h"
+#include "infini_train/include/dtype.h"
 #include "infini_train/include/tensor.h"
 
 namespace infini_train::kernels::cpu {
@@ -23,20 +24,23 @@ std::vector<int64_t> ComputeStrides(const std::vector<int64_t> &dims) {
 }
 
 std::shared_ptr<Tensor> UnaryForward(const std::shared_ptr<Tensor> &input, std::function<float(float)> unary_fn) {
-    auto output = std::make_shared<Tensor>(input->Dims(), DataType::kFLOAT32);
+    CHECK(dtype::IsFloatingPoint(input->Dtype()));
+    auto output = std::make_shared<Tensor>(input->Dims(), input->Dtype(), input->GetDevice());
     for (int64_t idx = 0; idx < output->NumElements(); ++idx) {
-        static_cast<float *>(output->DataPtr())[idx] = unary_fn(static_cast<float *>(input->DataPtr())[idx]);
+        dtype::StoreFromFloat(output->DataPtr(), output->Dtype(), idx,
+                              unary_fn(dtype::LoadAsFloat(input->DataPtr(), input->Dtype(), idx)));
     }
     return output;
 }
 
 std::shared_ptr<Tensor> UnaryBackward(const std::shared_ptr<Tensor> &grad_output, const std::shared_ptr<Tensor> &a,
                                       std::function<float(float)> unary_fn) {
-    auto grad_input = std::make_shared<Tensor>(grad_output->Dims(), DataType::kFLOAT32);
+    CHECK(dtype::IsFloatingPoint(grad_output->Dtype()));
+    auto grad_input = std::make_shared<Tensor>(grad_output->Dims(), grad_output->Dtype(), grad_output->GetDevice());
     for (int idx = 0; idx < grad_input->NumElements(); ++idx) {
-        const float x = a ? static_cast<float *>(a->DataPtr())[idx] : 0.0f;
-        const float grad = static_cast<float *>(grad_output->DataPtr())[idx];
-        static_cast<float *>(grad_input->DataPtr())[idx] = grad * unary_fn(x);
+        const float x = a ? dtype::LoadAsFloat(a->DataPtr(), a->Dtype(), idx) : 0.0f;
+        const float grad = dtype::LoadAsFloat(grad_output->DataPtr(), grad_output->Dtype(), idx);
+        dtype::StoreFromFloat(grad_input->DataPtr(), grad_input->Dtype(), idx, grad * unary_fn(x));
     }
     return grad_input;
 }
@@ -46,7 +50,8 @@ std::shared_ptr<Tensor> BinaryForward(const std::shared_ptr<Tensor> &a, const st
     // Currently a and b should have the same data type and only one-way broadcasting from b to a is assumed by default
     CHECK(a->Dtype() == b->Dtype() && a->NumElements() >= b->NumElements() && a->NumElements() % b->NumElements() == 0);
     auto out_dims = a->Dims();
-    auto output = std::make_shared<Tensor>(out_dims, DataType::kFLOAT32);
+    CHECK(dtype::IsFloatingPoint(a->Dtype()));
+    auto output = std::make_shared<Tensor>(out_dims, a->Dtype(), a->GetDevice());
     int64_t num_elements = output->NumElements();
 
     auto out_strides = ComputeStrides(out_dims);
@@ -57,10 +62,6 @@ std::shared_ptr<Tensor> BinaryForward(const std::shared_ptr<Tensor> &a, const st
     b_padded_dims.insert(b_padded_dims.begin(), ndim - b_padded_dims.size(), 1);
     b_strides.insert(b_strides.begin(), ndim - b_strides.size(), 0);
 
-    float *out_ptr = static_cast<float *>(output->DataPtr());
-    const float *a_ptr = static_cast<float *>(a->DataPtr());
-    const float *b_ptr = static_cast<float *>(b->DataPtr());
-
     for (int64_t idx = 0; idx < num_elements; ++idx) {
         int64_t tmp = idx, b_offset = 0;
         for (int i = 0; i < ndim; ++i) {
@@ -68,7 +69,9 @@ std::shared_ptr<Tensor> BinaryForward(const std::shared_ptr<Tensor> &a, const st
             tmp %= out_strides[i];
             b_offset += (b_padded_dims[i] == 1 ? 0 : index) * b_strides[i];
         }
-        out_ptr[idx] = binary_fn(a_ptr[idx], b_ptr[b_offset]);
+        const float a_value = dtype::LoadAsFloat(a->DataPtr(), a->Dtype(), idx);
+        const float b_value = dtype::LoadAsFloat(b->DataPtr(), b->Dtype(), b_offset);
+        dtype::StoreFromFloat(output->DataPtr(), output->Dtype(), idx, binary_fn(a_value, b_value));
     }
 
     return output;
@@ -92,8 +95,9 @@ BinaryBackward(const std::shared_ptr<Tensor> &grad_output, const std::shared_ptr
         CHECK_EQ(b_num_elements, b->NumElements());
     }
 
-    auto grad_a = std::make_shared<Tensor>(a_dims, DataType::kFLOAT32);
-    auto grad_b = std::make_shared<Tensor>(b_dims, DataType::kFLOAT32);
+    CHECK(dtype::IsFloatingPoint(grad_output->Dtype()));
+    auto grad_a = std::make_shared<Tensor>(a_dims, grad_output->Dtype(), grad_output->GetDevice());
+    auto grad_b = std::make_shared<Tensor>(b_dims, grad_output->Dtype(), grad_output->GetDevice());
     grad_a->Fill<float>(0.0f);
     grad_b->Fill<float>(0.0f);
 
@@ -112,12 +116,14 @@ BinaryBackward(const std::shared_ptr<Tensor> &grad_output, const std::shared_ptr
             b_offset += (b_padded_dims[i] == 1 ? 0 : index) * b_strides[i];
         }
 
-        const float x = a ? static_cast<const float *>(a->DataPtr())[idx] : 0.0f;
-        const float y = b ? static_cast<const float *>(b->DataPtr())[b_offset] : 0.0f;
-        const float grad = static_cast<const float *>(grad_output->DataPtr())[idx];
+        const float x = a ? dtype::LoadAsFloat(a->DataPtr(), a->Dtype(), idx) : 0.0f;
+        const float y = b ? dtype::LoadAsFloat(b->DataPtr(), b->Dtype(), b_offset) : 0.0f;
+        const float grad = dtype::LoadAsFloat(grad_output->DataPtr(), grad_output->Dtype(), idx);
 
-        static_cast<float *>(grad_a->DataPtr())[idx] = grad * fn_a(x, y);
-        static_cast<float *>(grad_b->DataPtr())[b_offset] += grad * fn_b(x, y);
+        dtype::StoreFromFloat(grad_a->DataPtr(), grad_a->Dtype(), idx, grad * fn_a(x, y));
+        const float accumulated = dtype::LoadAsFloat(grad_b->DataPtr(), grad_b->Dtype(), b_offset)
+                                  + grad * fn_b(x, y);
+        dtype::StoreFromFloat(grad_b->DataPtr(), grad_b->Dtype(), b_offset, accumulated);
     }
     return {grad_a, grad_b};
 }

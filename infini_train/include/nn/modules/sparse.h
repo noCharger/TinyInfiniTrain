@@ -13,7 +13,8 @@ public:
 
     static constexpr char kParamWeightName[] = "weight";
 
-    Embedding(int num_embeddings, int embedding_dim, Device device = Device());
+    Embedding(int num_embeddings, int embedding_dim, Device device = Device(),
+              DataType dtype = DataType::kFLOAT32);
     std::vector<std::shared_ptr<Tensor>> Forward(const std::vector<std::shared_ptr<Tensor>> &input_tensors) override;
 
 private:

@@ -1,5 +1,6 @@
 #include <chrono>
 #include <cstdlib>
+#include <filesystem>
 #include <format>
 #include <memory>
 #include <optional>
@@ -104,10 +105,21 @@ public:
 class GPT2TrainingTest : public ::testing::Test {
 protected:
     void SetUp() override {
-        llmc_filepath = "../../Data/gpt2_124M.bin";
-        input_bin = "../../Data/tinyshakespeare/tiny_shakespeare_train.bin";
-        tokenizer_bin = "../../Data/gpt2_tokenizer.bin";
-        logits_reference = "../../Data/gpt2_logits_reference.bin";
+        const auto repo_root = std::filesystem::path(__FILE__).parent_path().parent_path().parent_path();
+        llmc_filepath = (repo_root / "Data/gpt2_124M.bin").string();
+        input_bin = (repo_root / "Data/tinyshakespeare/tiny_shakespeare_train.bin").string();
+        tokenizer_bin = (repo_root / "Data/gpt2_tokenizer.bin").string();
+        logits_reference = (repo_root / "Data/gpt2_logits_reference.bin").string();
+
+#ifndef USE_CUDA
+        GTEST_SKIP() << "The optional 124M GPT-2 regression requires a CUDA build";
+#else
+        for (const auto *asset : {&llmc_filepath, &input_bin, &tokenizer_bin, &logits_reference}) {
+            if (!std::filesystem::exists(*asset)) {
+                GTEST_SKIP() << "Optional 124M GPT-2 asset not found: " << *asset;
+            }
+        }
+#endif
 
         device_flag = "cuda";
         model_name = "gpt2";

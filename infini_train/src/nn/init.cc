@@ -11,14 +11,45 @@
 #include "glog/logging.h"
 #ifdef USE_CUDA
 #include "cuda_runtime_api.h"
+#include "infini_train/include/cuda_utils.h"
 #endif
 
+#include "infini_train/include/dtype.h"
 #include "infini_train/include/tensor.h"
 
 namespace infini_train::nn::init {
 namespace {
 static std::random_device rd;
 static std::mt19937 gen(rd());
+
+void CopyFloatValues(const std::shared_ptr<Tensor> &tensor, const std::vector<float> &values) {
+    CHECK_EQ(values.size(), tensor->NumElements());
+    CHECK(dtype::IsFloatingPoint(tensor->Dtype()));
+    std::vector<uint8_t> staging(tensor->SizeInBytes());
+    for (size_t i = 0; i < values.size(); ++i) {
+        dtype::StoreFromFloat(staging.data(), tensor->Dtype(), i, values[i]);
+    }
+    switch (tensor->GetDevice().Type()) {
+    case DeviceType::kCPU:
+        std::memcpy(tensor->DataPtr(), staging.data(), staging.size());
+        break;
+#ifdef USE_CUDA
+    case DeviceType::kCUDA:
+        {
+            const cudaStream_t stream = infini_train::ThreadLocalStream(tensor->GetDevice().Index());
+            LOG_IF(FATAL,
+                   cudaMemcpyAsync(tensor->DataPtr(), staging.data(), staging.size(), cudaMemcpyHostToDevice, stream)
+                       != cudaSuccess)
+                << "cudaMemcpyAsync failed during parameter initialization";
+            LOG_IF(FATAL, cudaStreamSynchronize(stream) != cudaSuccess)
+                << "cudaStreamSynchronize failed during parameter initialization";
+        }
+        break;
+#endif
+    default:
+        LOG(FATAL) << "Unsupported device type: " << static_cast<int>(tensor->GetDevice().Type());
+    }
+}
 } // namespace
 
 std::shared_ptr<Tensor> Normal(const std::shared_ptr<Tensor> &tensor, float mean, float std,
@@ -28,22 +59,7 @@ std::shared_ptr<Tensor> Normal(const std::shared_ptr<Tensor> &tensor, float mean
     std::normal_distribution<float> dis(mean, std);
     std::generate(buffer.begin(), buffer.end(), [&]() { return generator ? dis(generator.value()) : dis(gen); });
 
-    switch (tensor->GetDevice().Type()) {
-    case DeviceType::kCPU: {
-        memcpy(tensor->DataPtr(), buffer.data(), num_elements * sizeof(float));
-        break;
-    }
-#ifdef USE_CUDA
-    case DeviceType::kCUDA: {
-        cudaMemcpyAsync(tensor->DataPtr(), buffer.data(), num_elements * sizeof(float), cudaMemcpyHostToDevice, 0);
-        break;
-    }
-#endif
-    default: {
-        LOG(FATAL) << "Unsupported device type: " << static_cast<int>(tensor->GetDevice().Type());
-        break;
-    }
-    }
+    CopyFloatValues(tensor, buffer);
     return tensor;
 }
 
@@ -115,70 +131,21 @@ std::shared_ptr<Tensor> Uniform(const std::shared_ptr<Tensor> &tensor, float a, 
     std::uniform_real_distribution<float> dis(a, b);
     std::generate(buffer.begin(), buffer.end(), [&]() { return generator ? dis(generator.value()) : dis(gen); });
 
-    switch (tensor->GetDevice().Type()) {
-    case DeviceType::kCPU: {
-        memcpy(tensor->DataPtr(), buffer.data(), num_elements * sizeof(float));
-        break;
-    }
-#ifdef USE_CUDA
-    case DeviceType::kCUDA: {
-        cudaMemcpyAsync(tensor->DataPtr(), buffer.data(), num_elements * sizeof(float), cudaMemcpyHostToDevice, 0);
-        break;
-    }
-#endif
-    default: {
-        LOG(FATAL) << "Unsupported device type: " << static_cast<int>(tensor->GetDevice().Type());
-        break;
-    }
-    }
+    CopyFloatValues(tensor, buffer);
     return tensor;
 }
 
 std::shared_ptr<Tensor> Ones(const std::shared_ptr<Tensor> &tensor) {
-    CHECK_EQ(static_cast<int>(tensor->Dtype()), static_cast<int>(DataType::kFLOAT32));
     const int64_t num_elements = tensor->NumElements();
     std::vector<float> buffer(num_elements, 1.0f);
-
-    switch (tensor->GetDevice().Type()) {
-    case DeviceType::kCPU: {
-        memcpy(tensor->DataPtr(), buffer.data(), num_elements * sizeof(float));
-        break;
-    }
-#ifdef USE_CUDA
-    case DeviceType::kCUDA: {
-        cudaMemcpyAsync(tensor->DataPtr(), buffer.data(), num_elements * sizeof(float), cudaMemcpyHostToDevice, 0);
-        break;
-    }
-#endif
-    default: {
-        LOG(FATAL) << "Unsupported device type: " << static_cast<int>(tensor->GetDevice().Type());
-        break;
-    }
-    }
+    CopyFloatValues(tensor, buffer);
     return tensor;
 }
 
 std::shared_ptr<Tensor> Zeros(const std::shared_ptr<Tensor> &tensor) {
-    CHECK_EQ(static_cast<int>(tensor->Dtype()), static_cast<int>(DataType::kFLOAT32));
     const int64_t num_elements = tensor->NumElements();
     std::vector<float> buffer(num_elements, 0.0f);
-
-    switch (tensor->GetDevice().Type()) {
-    case DeviceType::kCPU: {
-        memcpy(tensor->DataPtr(), buffer.data(), num_elements * sizeof(float));
-        break;
-    }
-#ifdef USE_CUDA
-    case DeviceType::kCUDA: {
-        cudaMemcpyAsync(tensor->DataPtr(), buffer.data(), num_elements * sizeof(float), cudaMemcpyHostToDevice, 0);
-        break;
-    }
-#endif
-    default: {
-        LOG(FATAL) << "Unsupported device type: " << static_cast<int>(tensor->GetDevice().Type());
-        break;
-    }
-    }
+    CopyFloatValues(tensor, buffer);
     return tensor;
 }
 
@@ -193,7 +160,12 @@ std::shared_ptr<Tensor> Zeros(const std::shared_ptr<Tensor> &tensor) {
     case DATA_TYPE: {                                                                                                  \
         std::vector<TYPE> buffer(num_elements);                                                                        \
         std::iota(buffer.begin(), buffer.end(), static_cast<TYPE>(start));                                             \
-        cudaMemcpyAsync(tensor->DataPtr(), buffer.data(), num_elements * sizeof(TYPE), cudaMemcpyHostToDevice, 0);     \
+        const cudaStream_t stream = infini_train::ThreadLocalStream(device.Index());                                  \
+        LOG_IF(FATAL, cudaMemcpyAsync(tensor->DataPtr(), buffer.data(), num_elements * sizeof(TYPE),                   \
+                                      cudaMemcpyHostToDevice, stream) != cudaSuccess)                                  \
+            << "cudaMemcpyAsync failed while creating CUDA arange tensor";                                           \
+        LOG_IF(FATAL, cudaStreamSynchronize(stream) != cudaSuccess)                                                    \
+            << "cudaStreamSynchronize failed while creating CUDA arange tensor";                                     \
         break;                                                                                                         \
     }
 

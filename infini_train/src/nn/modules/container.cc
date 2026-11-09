@@ -16,7 +16,7 @@ Sequential::Sequential(std::vector<std::unique_ptr<Module>> &&layers) {
 }
 
 std::vector<std::shared_ptr<Tensor>> Sequential::Forward(const std::vector<std::shared_ptr<Tensor>> &input_tensors) {
-    auto &x = const_cast<std::vector<std::shared_ptr<Tensor>> &>(input_tensors);
+    auto x = input_tensors;
     for (int idx = 0; idx < modules_.size(); ++idx) { x = modules_[std::to_string(idx)]->Forward(x); }
     return x;
 }

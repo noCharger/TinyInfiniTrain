@@ -7,6 +7,41 @@
 #include "infini_train/include/tensor.h"
 
 namespace infini_train::autograd {
+class Cast : public Function {
+public:
+    explicit Cast(DataType dtype) : Function("CastFunction"), output_dtype_(dtype) {}
+
+    std::vector<std::shared_ptr<Tensor>> Forward(
+        const std::vector<std::shared_ptr<Tensor>> &input_tensors) override;
+    void SetupContext(const std::vector<std::shared_ptr<Tensor>> &input_tensors,
+                      const std::vector<std::shared_ptr<Tensor>> &output_tensors) override;
+    std::vector<std::shared_ptr<Tensor>> Backward(
+        const std::vector<std::shared_ptr<Tensor>> &grad_outputs) override;
+
+private:
+    DataType input_dtype_ = DataType::kFLOAT32;
+    DataType output_dtype_ = DataType::kFLOAT32;
+};
+
+// Dynamically scaled FP8 fake quantization. Forward quantizes through physical
+// E4M3 bytes using `scaled = input * scale`, then dequantizes back to the input
+// dtype. Backward uses the standard straight-through estimator so gradients
+// and optimizer master weights remain BF16/FP16/FP32.
+class FP8FakeQuantize : public Function {
+public:
+    explicit FP8FakeQuantize(float scale) : Function("FP8FakeQuantizeFunction"), scale_(scale) {
+        CHECK_GT(scale_, 0.0f);
+    }
+
+    std::vector<std::shared_ptr<Tensor>> Forward(
+        const std::vector<std::shared_ptr<Tensor>> &input_tensors) override;
+    std::vector<std::shared_ptr<Tensor>> Backward(
+        const std::vector<std::shared_ptr<Tensor>> &grad_outputs) override;
+
+private:
+    float scale_;
+};
+
 class Split : public Function {
 public:
     static constexpr char kType[] = "SplitFunction";

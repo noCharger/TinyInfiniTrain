@@ -10,11 +10,11 @@
 
 namespace infini_train::nn {
 
-Embedding::Embedding(int num_embeddings, int embedding_dim, Device device) : Module(kType) {
+Embedding::Embedding(int num_embeddings, int embedding_dim, Device device, DataType dtype) : Module(kType) {
     device_ = device;
 
     parameters_[kParamWeightName]
-        = std::make_shared<Tensor>(std::vector<int64_t>{num_embeddings, embedding_dim}, DataType::kFLOAT32, device)
+        = std::make_shared<Tensor>(std::vector<int64_t>{num_embeddings, embedding_dim}, dtype, device)
               ->RequiresGrad();
     ResetParameters();
 }

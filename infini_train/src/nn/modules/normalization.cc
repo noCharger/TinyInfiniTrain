@@ -9,13 +9,14 @@
 #include "infini_train/include/tensor.h"
 
 namespace infini_train::nn {
-LayerNorm::LayerNorm(const std::vector<int64_t> &normalized_shape, float eps, Device device) : eps_(eps) {
+LayerNorm::LayerNorm(const std::vector<int64_t> &normalized_shape, float eps, Device device, DataType dtype)
+    : eps_(eps) {
     device_ = device;
 
     parameters_[kParamWeightName]
-        = std::make_shared<Tensor>(normalized_shape, DataType::kFLOAT32, device)->RequiresGrad();
+        = std::make_shared<Tensor>(normalized_shape, dtype, device)->RequiresGrad();
     parameters_[kParamBiasName]
-        = std::make_shared<Tensor>(normalized_shape, DataType::kFLOAT32, device)->RequiresGrad();
+        = std::make_shared<Tensor>(normalized_shape, dtype, device)->RequiresGrad();
     ResetParameters();
 }
 

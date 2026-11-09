@@ -1,10 +1,30 @@
 #include "infini_train/include/autograd/elementwise.h"
 
+#include <cmath>
 #include "infini_train/include/dispatcher.h"
+#include "infini_train/include/autograd/reduction.h"
 #include "infini_train/include/tensor.h"
 #include <optional>
 
 namespace infini_train::autograd {
+namespace {
+std::shared_ptr<Tensor> SumToShape(std::shared_ptr<Tensor> grad,
+                                   const std::vector<int64_t> &target_dims) {
+    while (grad->Dims().size() > target_dims.size()) {
+        grad = std::make_shared<Sum>(0, false)->Apply({grad})[0];
+    }
+    CHECK_EQ(grad->Dims().size(), target_dims.size());
+    for (size_t dim = 0; dim < target_dims.size(); ++dim) {
+        CHECK(target_dims[dim] == grad->Dims()[dim] || target_dims[dim] == 1)
+            << "Cannot reduce broadcast gradient to requested shape";
+        if (target_dims[dim] == 1 && grad->Dims()[dim] != 1) {
+            grad = std::make_shared<Sum>(static_cast<int64_t>(dim), true)->Apply({grad})[0];
+        }
+    }
+    return grad;
+}
+} // namespace
+
 std::vector<std::shared_ptr<Tensor>> Neg::Forward(const std::vector<std::shared_ptr<Tensor>> &input_tensors) {
     CHECK_EQ(input_tensors.size(), 1);
     const auto &input = input_tensors[0];
@@ -15,6 +35,7 @@ std::vector<std::shared_ptr<Tensor>> Neg::Forward(const std::vector<std::shared_
 std::vector<std::shared_ptr<Tensor>> Neg::Backward(const std::vector<std::shared_ptr<Tensor>> &grad_outputs) {
     CHECK_EQ(grad_outputs.size(), 1);
     const auto &grad_output = grad_outputs[0];
+    if (IsCreateGraphEnabled()) { return {-grad_output}; }
     auto kernel = Dispatcher::Instance().GetKernel({grad_output->GetDevice().Type(), "NegBackward"});
     return {kernel.Call<std::shared_ptr<Tensor>>(grad_output)};
 }
@@ -39,6 +60,10 @@ std::vector<std::shared_ptr<Tensor>> Reciprocal::Backward(const std::vector<std:
     const auto &input = saved_tensors_[0];
     CHECK_EQ(grad_outputs.size(), 1);
     const auto &grad_output = grad_outputs[0];
+
+    if (IsCreateGraphEnabled()) {
+        return {-grad_output * input->Pow(-2.0f)};
+    }
 
     auto device = input->GetDevice().Type();
     auto kernel = Dispatcher::Instance().GetKernel({device, "ReciprocalBackward"});
@@ -66,6 +91,8 @@ std::vector<std::shared_ptr<Tensor>> Sin::Backward(const std::vector<std::shared
     CHECK_EQ(grad_outputs.size(), 1);
     const auto &grad_output = grad_outputs[0];
 
+    if (IsCreateGraphEnabled()) { return {grad_output * input->Cos()}; }
+
     auto device = input->GetDevice().Type();
     auto kernel = Dispatcher::Instance().GetKernel({device, "SinBackward"});
     return {kernel.Call<std::shared_ptr<Tensor>>(grad_output, input)};
@@ -91,6 +118,8 @@ std::vector<std::shared_ptr<Tensor>> Cos::Backward(const std::vector<std::shared
     const auto &input = saved_tensors_[0];
     CHECK_EQ(grad_outputs.size(), 1);
     const auto &grad_output = grad_outputs[0];
+
+    if (IsCreateGraphEnabled()) { return {-grad_output * input->Sin()}; }
 
     auto device = input->GetDevice().Type();
     auto kernel = Dispatcher::Instance().GetKernel({device, "CosBackward"});
@@ -118,6 +147,10 @@ std::vector<std::shared_ptr<Tensor>> Tanh::Backward(const std::vector<std::share
     CHECK_EQ(grad_outputs.size(), 1);
     const auto &grad_output = grad_outputs[0];
 
+    if (IsCreateGraphEnabled()) {
+        return {grad_output * (1.0f - output * output)};
+    }
+
     auto device = output->GetDevice().Type();
     auto kernel = Dispatcher::Instance().GetKernel({device, "TanhBackward"});
     return {kernel.Call<std::shared_ptr<Tensor>>(grad_output, output)};
@@ -144,6 +177,14 @@ std::vector<std::shared_ptr<Tensor>> Pow::Backward(const std::vector<std::shared
     CHECK_EQ(grad_outputs.size(), 1);
     const auto &grad_output = grad_outputs[0];
 
+    if (IsCreateGraphEnabled()) {
+        if (scalar_is_base_) {
+            auto value = std::make_shared<Pow>(exponent_, true)->Apply({input})[0];
+            return {grad_output * value * std::log(exponent_)};
+        }
+        return {grad_output * input->Pow(exponent_ - 1.0f) * exponent_};
+    }
+
     auto device = input->GetDevice().Type();
     auto kernel = Dispatcher::Instance().GetKernel({device, "PowBackward"});
     return {kernel.Call<std::shared_ptr<Tensor>>(grad_output, input, exponent_, scalar_is_base_)};
@@ -169,6 +210,10 @@ std::vector<std::shared_ptr<Tensor>> Rsqrt::Backward(const std::vector<std::shar
     const auto &input = saved_tensors_[0];
     CHECK_EQ(grad_outputs.size(), 1);
     const auto &grad_output = grad_outputs[0];
+
+    if (IsCreateGraphEnabled()) {
+        return {grad_output * input->Pow(-1.5f) * -0.5f};
+    }
 
     auto device = input->GetDevice().Type();
     auto kernel = Dispatcher::Instance().GetKernel({device, "RsqrtBackward"});
@@ -209,6 +254,10 @@ std::vector<std::shared_ptr<Tensor>> Add::Backward(const std::vector<std::shared
     CHECK_EQ(grad_outputs.size(), 1);
     const auto &grad_output = grad_outputs[0];
 
+    if (IsCreateGraphEnabled()) {
+        return {SumToShape(grad_output, a_dims_), SumToShape(grad_output, b_dims_)};
+    }
+
     auto device = grad_output->GetDevice().Type();
     auto kernel = Dispatcher::Instance().GetKernel({device, "AddBackward"});
     auto [grad_a, grad_b]
@@ -228,6 +277,8 @@ std::vector<std::shared_ptr<Tensor>> AddScalar::Forward(const std::vector<std::s
 std::vector<std::shared_ptr<Tensor>> AddScalar::Backward(const std::vector<std::shared_ptr<Tensor>> &grad_outputs) {
     CHECK_EQ(grad_outputs.size(), 1);
     const auto &grad_output = grad_outputs[0];
+
+    if (IsCreateGraphEnabled()) { return {grad_output}; }
 
     auto device = grad_output->GetDevice().Type();
     auto kernel = Dispatcher::Instance().GetKernel({device, "AddScalarBackward"});
@@ -253,6 +304,10 @@ void Sub::SetupContext(const std::vector<std::shared_ptr<Tensor>> &input_tensors
 std::vector<std::shared_ptr<Tensor>> Sub::Backward(const std::vector<std::shared_ptr<Tensor>> &grad_outputs) {
     CHECK_EQ(grad_outputs.size(), 1);
     const auto &grad_output = grad_outputs[0];
+
+    if (IsCreateGraphEnabled()) {
+        return {SumToShape(grad_output, a_dims_), SumToShape(-grad_output, b_dims_)};
+    }
 
     auto device = grad_output->GetDevice().Type();
     auto kernel = Dispatcher::Instance().GetKernel({device, "SubBackward"});
@@ -285,6 +340,11 @@ std::vector<std::shared_ptr<Tensor>> Mul::Backward(const std::vector<std::shared
     CHECK_EQ(grad_outputs.size(), 1);
     const auto &grad_output = grad_outputs[0];
 
+    if (IsCreateGraphEnabled()) {
+        return {SumToShape(grad_output * b, a->Dims()),
+                SumToShape(grad_output * a, b->Dims())};
+    }
+
     auto device = grad_output->GetDevice().Type();
     auto kernel = Dispatcher::Instance().GetKernel({device, "MulBackward"});
     auto [grad_a, grad_b] = kernel.Call<std::pair<std::shared_ptr<Tensor>, std::shared_ptr<Tensor>>>(grad_output, a, b);
@@ -303,6 +363,8 @@ std::vector<std::shared_ptr<Tensor>> MulScalar::Forward(const std::vector<std::s
 std::vector<std::shared_ptr<Tensor>> MulScalar::Backward(const std::vector<std::shared_ptr<Tensor>> &grad_outputs) {
     CHECK_EQ(grad_outputs.size(), 1);
     const auto &grad_output = grad_outputs[0];
+
+    if (IsCreateGraphEnabled()) { return {grad_output * scalar_}; }
 
     auto device = grad_output->GetDevice().Type();
     auto kernel = Dispatcher::Instance().GetKernel({device, "MulScalarBackward"});
@@ -332,6 +394,12 @@ std::vector<std::shared_ptr<Tensor>> Div::Backward(const std::vector<std::shared
     const auto &b = saved_tensors_[1];
     CHECK_EQ(grad_outputs.size(), 1);
     const auto &grad_output = grad_outputs[0];
+
+    if (IsCreateGraphEnabled()) {
+        auto grad_a = SumToShape(grad_output / b, a->Dims());
+        auto grad_b = SumToShape(-(grad_output * a) / (b * b), b->Dims());
+        return {grad_a, grad_b};
+    }
 
     auto device = grad_output->GetDevice().Type();
     auto kernel = Dispatcher::Instance().GetKernel({device, "DivBackward"});

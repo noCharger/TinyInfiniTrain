@@ -11,6 +11,7 @@
 
 #ifdef USE_CUDA
 #include "cuda_runtime_api.h"
+#include "infini_train/include/cuda_utils.h"
 #endif
 #include "Eigen/Dense"
 #include "glog/logging.h"
@@ -22,6 +23,7 @@
 #include "infini_train/include/autograd/transform.h"
 #include "infini_train/include/device.h"
 #include "infini_train/include/dispatcher.h"
+#include "infini_train/include/dtype.h"
 #include "infini_train/include/nn/init.h"
 
 namespace infini_train {
@@ -29,30 +31,18 @@ namespace {
 const std::unordered_map<DataType, size_t> kDataTypeToSize = {
     {DataType::kUINT8, 1},    {DataType::kINT8, 1},    {DataType::kUINT16, 2},  {DataType::kINT16, 2},
     {DataType::kUINT32, 4},   {DataType::kINT32, 4},   {DataType::kUINT64, 8},  {DataType::kINT64, 8},
-    {DataType::kBFLOAT16, 2}, {DataType::kFLOAT16, 2}, {DataType::kFLOAT32, 4}, {DataType::kFLOAT64, 8},
+    {DataType::kFLOAT8_E4M3, 1}, {DataType::kBFLOAT16, 2}, {DataType::kFLOAT16, 2},
+    {DataType::kFLOAT32, 4}, {DataType::kFLOAT64, 8},
 };
 
 const std::unordered_map<DataType, std::string> kDataTypeToDesc = {
     {DataType::kUINT8, "uint8"},   {DataType::kINT8, "int8"},     {DataType::kUINT16, "uint16"},
     {DataType::kINT16, "int16"},   {DataType::kUINT32, "uint32"}, {DataType::kINT32, "int32"},
-    {DataType::kUINT64, "uint64"}, {DataType::kINT64, "int64"},   {DataType::kBFLOAT16, "bf16"},
-    {DataType::kFLOAT16, "fp16"},  {DataType::kFLOAT32, "fp32"},  {DataType::kFLOAT64, "fp64"},
+    {DataType::kUINT64, "uint64"}, {DataType::kINT64, "int64"},   {DataType::kFLOAT8_E4M3, "fp8_e4m3"},
+    {DataType::kBFLOAT16, "bf16"}, {DataType::kFLOAT16, "fp16"},  {DataType::kFLOAT32, "fp32"},
+    {DataType::kFLOAT64, "fp64"},
 };
 
-template <DataType DType> struct TypeMap;
-
-template <> struct TypeMap<DataType::kFLOAT32> {
-    using type = float;
-};
-template <> struct TypeMap<DataType::kFLOAT64> {
-    using type = double;
-};
-template <> struct TypeMap<DataType::kINT32> {
-    using type = int32_t;
-};
-template <> struct TypeMap<DataType::kINT64> {
-    using type = int64_t;
-};
 } // namespace
 
 TensorBuffer::TensorBuffer(Device device, size_t size) : device_(device), size_(size) {
@@ -62,7 +52,7 @@ TensorBuffer::TensorBuffer(Device device, size_t size) : device_(device), size_(
         break;
 #ifdef USE_CUDA
     case DeviceType::kCUDA:
-        cudaMallocAsync(&data_, size, 0);
+        cudaMallocAsync(&data_, size, infini_train::ThreadLocalStream(device_.Index()));
         break;
 #endif
     default:
@@ -78,7 +68,7 @@ TensorBuffer::~TensorBuffer() {
         break;
 #ifdef USE_CUDA
     case DeviceType::kCUDA:
-        cudaFreeAsync(data_, 0);
+        cudaFreeAsync(data_, infini_train::ThreadLocalStream(device_.Index()));
         break;
 #endif
     default:
@@ -96,22 +86,30 @@ Device TensorBuffer::GetDevice() const { return device_; }
 size_t TensorBuffer::Size() const { return size_; }
 
 // Tensor implementation
-Tensor::Tensor(const std::vector<int64_t> &dims, DataType dtype, Device device) : dims_(dims), dtype_(dtype) {
+Tensor::Tensor(const std::vector<int64_t> &dims, DataType dtype, Device device)
+    : device_(device), dims_(dims), dtype_(dtype) {
     num_elements_ = std::accumulate(dims.begin(), dims.end(), 1, std::multiplies<int64_t>());
-    buffer_ = std::make_shared<TensorBuffer>(device, kDataTypeToSize.at(dtype) * num_elements_);
+    AllocateStorage();
 }
 
 Tensor::Tensor(const Tensor &tensor, size_t offset, const std::vector<int64_t> &dims)
-    : buffer_(tensor.buffer_), offset_(offset), dims_(dims),
+    : buffer_(tensor.buffer_), device_(tensor.device_), offset_(tensor.offset_ + offset), dims_(dims),
       num_elements_(std::accumulate(dims.begin(), dims.end(), 1, std::multiplies<int64_t>())), dtype_(tensor.dtype_) {
+    CHECK(buffer_) << "Cannot create a view of a tensor whose storage is not materialized";
     CHECK_LE(offset_ + kDataTypeToSize.at(dtype_) * num_elements_, buffer_->Size());
 }
 
-Device Tensor::GetDevice() const { return buffer_->GetDevice(); }
+Device Tensor::GetDevice() const { return device_; }
 
-void *Tensor::DataPtr() { return reinterpret_cast<uint8_t *>(buffer_->DataPtr()) + offset_; }
+void *Tensor::DataPtr() {
+    CHECK(buffer_) << "Tensor storage is not materialized; materialize ZeRO-3 parameters before forward";
+    return reinterpret_cast<uint8_t *>(buffer_->DataPtr()) + offset_;
+}
 
-const void *Tensor::DataPtr() const { return reinterpret_cast<const uint8_t *>(buffer_->DataPtr()) + offset_; }
+const void *Tensor::DataPtr() const {
+    CHECK(buffer_) << "Tensor storage is not materialized; materialize ZeRO-3 parameters before forward";
+    return reinterpret_cast<const uint8_t *>(buffer_->DataPtr()) + offset_;
+}
 
 size_t Tensor::SizeInBytes() const { return kDataTypeToSize.at(dtype_) * num_elements_; }
 
@@ -121,42 +119,21 @@ size_t Tensor::NumElements() const { return num_elements_; }
 
 DataType Tensor::Dtype() const { return dtype_; }
 
+void Tensor::AllocateStorage() {
+    CHECK_EQ(offset_, 0u) << "Only base tensors can allocate storage";
+    if (!buffer_) {
+        buffer_ = std::make_shared<TensorBuffer>(device_, kDataTypeToSize.at(dtype_) * num_elements_);
+    }
+}
+
+void Tensor::ReleaseStorage() {
+    CHECK_EQ(offset_, 0u) << "Only base tensors can release storage";
+    buffer_.reset();
+}
+
 template <typename T> void Tensor::Fill(T value) {
-    DataType dtype = Dtype();
-
-    uint64_t storage = 0;
-
-    switch (dtype) {
-    case DataType::kFLOAT32: {
-        using TargetT = typename TypeMap<DataType::kFLOAT32>::type;
-        TargetT casted_value = static_cast<TargetT>(value);
-        std::memcpy(&storage, &casted_value, sizeof(TargetT));
-        break;
-    }
-    case DataType::kFLOAT64: {
-        using TargetT = typename TypeMap<DataType::kFLOAT64>::type;
-        TargetT casted_value = static_cast<TargetT>(value);
-        std::memcpy(&storage, &casted_value, sizeof(TargetT));
-        break;
-    }
-    case DataType::kINT32: {
-        using TargetT = typename TypeMap<DataType::kINT32>::type;
-        TargetT casted_value = static_cast<TargetT>(value);
-        std::memcpy(&storage, &casted_value, sizeof(TargetT));
-        break;
-    }
-    case DataType::kINT64: {
-        using TargetT = typename TypeMap<DataType::kINT64>::type;
-        TargetT casted_value = static_cast<TargetT>(value);
-        std::memcpy(&storage, &casted_value, sizeof(TargetT));
-        break;
-    }
-    default:
-        throw std::runtime_error("Unsupported data type in Tensor::Fill()");
-    }
-
     auto kernel = Dispatcher::Instance().GetKernel({GetDevice().Type(), "Fill"});
-    kernel.Call<void>(shared_from_this(), static_cast<void *>(&storage));
+    kernel.Call<void>(shared_from_this(), static_cast<double>(value));
 }
 
 template void Tensor::Fill<float>(float);
@@ -174,10 +151,11 @@ Eigen::Map<Eigen::Matrix<float, 1, Eigen::Dynamic, Eigen::RowMajor>> Tensor::Eig
 }
 
 Tensor Tensor::To(Device device) {
-    if (device == buffer_->GetDevice()) {
-        auto new_tensor = Tensor(*this, offset_, dims_);
+    CHECK(buffer_) << "Cannot move a tensor whose storage is not materialized";
+    if (device == GetDevice()) {
+        auto new_tensor = Tensor(*this, 0, dims_);
         if (grad_) {
-            new_tensor.grad_ = std::make_unique<Tensor>(*grad_.get(), grad_->offset_, grad_->dims_);
+            new_tensor.grad_ = std::make_unique<Tensor>(*grad_.get(), 0, grad_->dims_);
         }
         return new_tensor;
     }
@@ -188,12 +166,40 @@ Tensor Tensor::To(Device device) {
     case DeviceType::kCPU:
         // CUDA -> CPU
         new_tensor = Tensor(dims_, dtype_, Device(DeviceType::kCPU, 0));
-        cudaMemcpyAsync(new_tensor.DataPtr(), DataPtr(), SizeInBytes(), cudaMemcpyDeviceToHost, 0);
+        {
+            const cudaStream_t stream = infini_train::ThreadLocalStream(GetDevice().Index());
+            LOG_IF(FATAL,
+                   cudaMemcpyAsync(new_tensor.DataPtr(), DataPtr(), SizeInBytes(), cudaMemcpyDeviceToHost, stream)
+                       != cudaSuccess)
+                << "cudaMemcpyAsync failed for CUDA-to-CPU tensor copy";
+            LOG_IF(FATAL, cudaStreamSynchronize(stream) != cudaSuccess)
+                << "cudaStreamSynchronize failed after CUDA-to-CPU tensor copy";
+        }
         break;
     case DeviceType::kCUDA:
-        // CPU -> CUDA
-        new_tensor = Tensor(dims_, dtype_, Device(DeviceType::kCUDA, 0));
-        cudaMemcpyAsync(new_tensor.DataPtr(), DataPtr(), SizeInBytes(), cudaMemcpyHostToDevice, 0);
+        new_tensor = Tensor(dims_, dtype_, device);
+        if (GetDevice().Type() == DeviceType::kCPU) {
+            // The source often belongs to a temporary host tensor (for example
+            // Module::To). Synchronizing the destination stream guarantees that
+            // its storage may be released as soon as this method returns.
+            const cudaStream_t stream = infini_train::ThreadLocalStream(device.Index());
+            LOG_IF(FATAL,
+                   cudaMemcpyAsync(new_tensor.DataPtr(), DataPtr(), SizeInBytes(), cudaMemcpyHostToDevice, stream)
+                       != cudaSuccess)
+                << "cudaMemcpyAsync failed for CPU-to-CUDA tensor copy";
+            LOG_IF(FATAL, cudaStreamSynchronize(stream) != cudaSuccess)
+                << "cudaStreamSynchronize failed after CPU-to-CUDA tensor copy";
+        } else {
+            const int source_device = GetDevice().Index();
+            LOG_IF(FATAL, cudaStreamSynchronize(infini_train::ThreadLocalStream(source_device)) != cudaSuccess)
+                << "cudaStreamSynchronize failed before cross-device tensor copy";
+            const cudaStream_t destination_stream = infini_train::ThreadLocalStream(device.Index());
+            LOG_IF(FATAL, cudaMemcpyPeerAsync(new_tensor.DataPtr(), device.Index(), DataPtr(), source_device,
+                                              SizeInBytes(), destination_stream) != cudaSuccess)
+                << "cudaMemcpyPeerAsync failed for cross-device tensor copy";
+            LOG_IF(FATAL, cudaStreamSynchronize(destination_stream) != cudaSuccess)
+                << "cudaStreamSynchronize failed after cross-device tensor copy";
+        }
         break;
 #endif
     default:
@@ -206,6 +212,31 @@ Tensor Tensor::To(Device device) {
 
     new_tensor.requires_grad_ = requires_grad_;
 
+    return new_tensor;
+}
+
+std::shared_ptr<Tensor> Tensor::Cast(DataType dtype) {
+    if (dtype == dtype_) { return std::make_shared<Tensor>(*this, 0, dims_); }
+    CHECK(infini_train::dtype::IsFloatingPoint(dtype_) && infini_train::dtype::IsFloatingPoint(dtype))
+        << "Autograd casts currently support floating-point dtypes only";
+    return std::make_shared<autograd::Cast>(dtype)->Apply({shared_from_this()})[0];
+}
+
+std::shared_ptr<Tensor> Tensor::Clone() const {
+    auto new_tensor = std::make_shared<Tensor>(dims_, dtype_, GetDevice());
+    switch (GetDevice().Type()) {
+    case DeviceType::kCPU:
+        std::memcpy(new_tensor->DataPtr(), DataPtr(), SizeInBytes());
+        break;
+#ifdef USE_CUDA
+    case DeviceType::kCUDA:
+        cudaMemcpyAsync(new_tensor->DataPtr(), DataPtr(), SizeInBytes(), cudaMemcpyDeviceToDevice,
+                        infini_train::ThreadLocalStream(GetDevice().Index()));
+        break;
+#endif
+    default:
+        LOG(FATAL) << "Unsupported device type: " << static_cast<int>(GetDevice().Type());
+    }
     return new_tensor;
 }
 
@@ -353,6 +384,8 @@ std::shared_ptr<Tensor> Tensor::Uniform(float from, float to, std::optional<std:
 
 // autograd related
 std::shared_ptr<Tensor> Tensor::RequiresGrad() {
+    CHECK(infini_train::dtype::IsFloatingPoint(dtype_))
+        << "Only floating-point tensors can require gradients";
     requires_grad_ = true;
     if (!grad_) {
         grad_ = std::make_unique<Tensor>(dims_, dtype_, GetDevice());
@@ -362,13 +395,34 @@ std::shared_ptr<Tensor> Tensor::RequiresGrad() {
 }
 
 void Tensor::Backward(std::shared_ptr<Tensor> gradient, bool retain_graph, bool create_graph) const {
+    CHECK(requires_grad_) << "Cannot call Backward() on a tensor that does not require gradients";
     if (!gradient) {
         gradient = std::make_shared<Tensor>(dims_, dtype_, GetDevice());
         gradient->Fill<float>(1.0f);
     }
+    CHECK(gradient->Dims() == dims_) << "Gradient shape must match the output tensor shape";
+    CHECK_EQ(static_cast<int>(gradient->Dtype()), static_cast<int>(dtype_));
+    CHECK_EQ(gradient->GetDevice(), GetDevice());
     if (grad_fn_) {
-        grad_fn_->BackwardPartial(gradient, output_idx_);
+        autograd::RunBackward(grad_fn_, gradient, output_idx_, retain_graph, create_graph);
+    } else {
+        const_cast<Tensor *>(this)->AccumulateGrad(gradient, create_graph);
     }
+}
+
+void Tensor::AccumulateGrad(const std::shared_ptr<Tensor> &gradient, bool create_graph) {
+    CHECK(gradient);
+    CHECK(gradient->Dims() == dims_);
+    if (!grad_) {
+        grad_ = std::make_shared<Tensor>(dims_, dtype_, GetDevice());
+        grad_->Fill<float>(0.0f);
+    }
+    if (create_graph) {
+        grad_ = grad_->Add(gradient);
+        return;
+    }
+    auto kernel = Dispatcher::Instance().GetKernel({GetDevice().Type(), "AccumulateGrad"});
+    kernel.Call<void>(gradient, 1.0f, grad_);
 }
 
 void Tensor::ZeroGrad() {

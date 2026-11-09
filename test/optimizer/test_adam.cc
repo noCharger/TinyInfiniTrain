@@ -2,6 +2,7 @@
 #include<vector>
 
 #include "gtest/gtest.h"
+#include "infini_train/include/dtype.h"
 #include "infini_train/include/tensor.h"
 #include "infini_train/include/device.h"
 #include "infini_train/include/optimizer.h"
@@ -57,4 +58,46 @@ TEST(AdamOptimizerTest, MomentumAccumulation) {
         expected_update -= learning_rate * m_hat / (std::sqrt(v_hat) + 1e-8f);
         EXPECT_NEAR(param_history[t-1] - 1.0f, expected_update, 1e-5);
     }
+}
+
+TEST(AdamOptimizerTest, FP16ParameterUsesFP32State) {
+    auto param = std::make_shared<Tensor>(std::vector<int64_t>{1}, DataType::kFLOAT16);
+    param->Fill(1.0f);
+    param->RequiresGrad();
+    param->grad()->Fill(1.0f);
+
+    optimizers::Adam optimizer({param}, 0.01f);
+    optimizer.Step();
+
+    const float value = static_cast<float>(static_cast<dtype::Float16 *>(param->DataPtr())[0]);
+    EXPECT_LT(value, 1.0f);
+    EXPECT_NEAR(value, 0.99f, 1e-3f);
+}
+
+TEST(AdamOptimizerTest, BF16MasterWeightAccumulatesSubUlpUpdates) {
+    auto param = std::make_shared<Tensor>(std::vector<int64_t>{1}, DataType::kBFLOAT16);
+    param->Fill(1.0f);
+    param->RequiresGrad();
+    param->grad()->Fill(1.0f);
+
+    optimizers::Adam optimizer({param}, 0.001f);
+    for (int step = 0; step < 8; ++step) { optimizer.Step(); }
+
+    const float value = static_cast<float>(static_cast<dtype::BFloat16 *>(param->DataPtr())[0]);
+    EXPECT_LT(value, 1.0f);
+    EXPECT_NEAR(value, 0.992f, 0.004f);
+}
+
+TEST(AdamOptimizerTest, FP8MasterWeightAccumulatesSubUlpUpdates) {
+    auto param = std::make_shared<Tensor>(std::vector<int64_t>{1}, DataType::kFLOAT8_E4M3);
+    param->Fill(1.0f);
+    param->RequiresGrad();
+    param->grad()->Fill(1.0f);
+
+    optimizers::Adam optimizer({param}, 0.01f);
+    // A direct E4M3 update would round 0.99 back to 1.0 on every step. The
+    // FP32 master accumulates updates until the model copy crosses an E4M3 bin.
+    for (int step = 0; step < 8; ++step) { optimizer.Step(); }
+
+    EXPECT_LT(dtype::LoadAsFloat(param->DataPtr(), param->Dtype(), 0), 1.0f);
 }

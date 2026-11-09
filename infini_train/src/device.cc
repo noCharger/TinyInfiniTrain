@@ -12,9 +12,6 @@ Device::Device(DeviceType type, int8_t index) : type_(type), index_(index) {
         LOG(FATAL) << "CPU device index should be 0";
     }
 
-    if (type_ == DeviceType::kCUDA && index_ != 0) {
-        LOG(FATAL) << "CUDA device index should be 0";
-    }
 }
 
 bool Device::operator==(const Device &other) const { return type_ == other.type_ && index_ == other.index_; }

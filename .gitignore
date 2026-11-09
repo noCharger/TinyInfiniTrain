@@ -1,4 +1,8 @@
 build/
 .cache/
 .vscode/
-Data/
+Data/*
+!Data/tiny_gpt2_fp16_reference.bin
+.gitnexus
+__pycache__/
+*.pyc

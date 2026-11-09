@@ -5,6 +5,7 @@
 #include "glog/logging.h"
 
 #include "infini_train/include/dispatcher.h"
+#include "infini_train/include/dtype.h"
 #include "infini_train/include/tensor.h"
 
 namespace infini_train::kernels::cpu {
@@ -49,8 +50,8 @@ std::shared_ptr<Tensor> SliceForward(const std::shared_ptr<Tensor> &input, const
                 src_offset += src_index[i] * src_strides[i];
                 dst_offset += dst_index[i] * dst_strides[i];
             }
-            static_cast<float *>(new_tensor->DataPtr())[dst_offset]
-                = static_cast<const float *>(input->DataPtr())[src_offset];
+            dtype::StoreFromFloat(new_tensor->DataPtr(), new_tensor->Dtype(), dst_offset,
+                                  dtype::LoadAsFloat(input->DataPtr(), input->Dtype(), src_offset));
             return;
         }
 
@@ -110,8 +111,8 @@ std::shared_ptr<Tensor> SliceBackward(const std::shared_ptr<Tensor> &grad_output
                 src_offset += src_index[i] * src_strides[i];
                 dst_offset += dst_index[i] * dst_strides[i];
             }
-            static_cast<float *>(new_tensor->DataPtr())[src_offset]
-                = static_cast<const float *>(grad_output->DataPtr())[dst_offset];
+            dtype::StoreFromFloat(new_tensor->DataPtr(), new_tensor->Dtype(), src_offset,
+                                  dtype::LoadAsFloat(grad_output->DataPtr(), grad_output->Dtype(), dst_offset));
             return;
         }
 
